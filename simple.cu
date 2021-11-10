@@ -15,11 +15,11 @@ Full Connected Linear: in=256, out=3 | ReLu and softmax
 #include <sys/time.h>
 #include <stdlib.h>
 #include <math.h>
-#include "cnn_weights.cu"
-//#define PRINTDATA 1
+//#include "cnn_weights.cu"
+#define PRINTDATA 1
 
-#define INPUT_WIDTH 56
-#define INPUT_HEIGHT 100
+#define INPUT_WIDTH 5//56
+#define INPUT_HEIGHT 6//100
 
 /*You can use the following for any CUDA function that returns cudaError_t type*/
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
@@ -37,7 +37,7 @@ double getTimeStamp() {
         gettimeofday( &tv, NULL );
         return (double) tv.tv_usec/1000000 + tv.tv_sec;
 }
-
+/*
 __constant__ float device_cov1_b;
 __constant__ float device_cov1_filter1[COV1_FILTER_N][COV1_FILTER_N];
 __constant__ float device_cov1_filter2[COV1_FILTER_N][COV1_FILTER_N];
@@ -48,7 +48,7 @@ __constant__ float device_cov1_filter6[COV1_FILTER_N][COV1_FILTER_N];
 __constant__ float device_cov1_filter7[COV1_FILTER_N][COV1_FILTER_N];
 __constant__ float device_cov1_filter8[COV1_FILTER_N][COV1_FILTER_N];
 
-
+*/
 /*
 https://stackoverflow.com/questions/37674306/what-is-the-difference-between-same-and-valid-padding-in-tf-nn-max-pool-of-t
 https://d2l.ai/chapter_convolutional-neural-networks/padding-and-strides.html
@@ -70,7 +70,7 @@ out_height = (100 - F + 2P)/1 + 1 = 101 - F + 2P
 For F = 8x8
 P = (8 - 1)/2 = 3.5 = 
 
-*/
+*//*
 __device__ void device_CNN(float *in, float *out, float *filter, int filterSize, int padding) {
     const int x = threadIdx.x + blockIdx.x * blockDim.x;
     const int y = threadIdx.y + blockIdx.y * blockDim.y;
@@ -84,7 +84,7 @@ __device__ void device_CNN(float *in, float *out, float *filter, int filterSize,
     }
 
     out[]
-}
+}*/
 
 // Generate Input Data
 void initData(float *in, int width, int height, int padding) {
@@ -126,7 +126,7 @@ int allocInput(int width, int height, int padding, float **out) {
     
     return bytes;
 }
-
+/*
 void setUpCNNFilters() {
     cudaMemcpyToSymbol(device_cov1_b, host_cov1_b, sizeof(float));
     cudaMemcpyToSymbol(device_cov1_filter1, host_cov1_filter1, COV1_FILTER_N*COV1_FILTER_N*sizeof(float));
@@ -137,15 +137,14 @@ void setUpCNNFilters() {
     cudaMemcpyToSymbol(device_cov1_filter6, host_cov1_filter6, COV1_FILTER_N*COV1_FILTER_N*sizeof(float));
     cudaMemcpyToSymbol(device_cov1_filter7, host_cov1_filter7, COV1_FILTER_N*COV1_FILTER_N*sizeof(float));
     cudaMemcpyToSymbol(device_cov1_filter8, host_cov1_filter8, COV1_FILTER_N*COV1_FILTER_N*sizeof(float));
-
-}
+}*/
 
 int main( int argc, char *argv[])
 {    
     // Allocate intial input to CNN with padding
     float *h_input = NULL;
-    int padding = getPadding(COV1_FILTER_N);
-    int bytes = allocInput(INPUT_WIDTH, INPUT_HEIGHT, padding, &h_input);
+    int padding = getPadding(3);
+    int bytes = allocInput(5, 6, padding, &h_input);
     if (bytes == -1) {
         printf("Error: Failed to allocte host memory for input");
         return 1;
@@ -155,7 +154,7 @@ int main( int argc, char *argv[])
     printf("Input:\n");
     Print2D(h_input, INPUT_WIDTH + padding, INPUT_HEIGHT + padding);
 #endif
-    
+    /*
     gpuErrchk(cudaDeviceReset());
 
     // Pinning host memory so pages are not paged to disk for DMA to work
