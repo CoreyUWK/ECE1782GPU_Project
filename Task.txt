@@ -1,0 +1,18 @@
+ToDo:
+- What are the numbers for research group GPU processing of CNN?
+    - FPGA?
+    - Keras Tensorflow?
+
+- What are numbers for basic CNN in cuda?
+- What are numbers for optimized CNN in cuda?
+- What are numbers for cuDNN in cuda version?
+
+For initial implementation can use random weights and make model specific in code, with random input
+Can compare results in tensorflow
+
+
+- Then need numbers for memory utilization, number of parallel interferences (throughput)
+
+- look at research papers and sources online for optimized CNN cuda implementation
+
+- CNN research Paper vs code
