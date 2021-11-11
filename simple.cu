@@ -16,10 +16,10 @@ Full Connected Linear: in=256, out=3 | ReLu and softmax
 #include <stdlib.h>
 #include <math.h>
 #include "cnn_weights.cu"
-#define PRINTDATA 1
+//#define PRINTDATA 1
 
-#define INPUT_WIDTH 4//56
-#define INPUT_HEIGHT 5//100
+#define INPUT_WIDTH 100
+#define INPUT_HEIGHT 56
 
 /*You can use the following for any CUDA function that returns cudaError_t type*/
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
@@ -61,6 +61,80 @@ P = (8 - 1)/2 = 3.5 =
 
 */
 __device__ void device_CNN(float *inCh, float *outCh, float *filter, int filterSize) {
+    // Position relative to global memory of 2D matrix
+    const int x = threadIdx.x + blockIdx.x * blockDim.x;
+    const int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+    if (x >= INPUT_WIDTH || y >= INPUT_HEIGHT) {
+        return;
+    }
+
+    const int offset_GM = y * INPUT_WIDTH + x;
+
+    // P=max(F−S,0)
+    const int totalPaddingHeight = filterSize - 1;
+    const int totalPaddingWidth = filterSize - 1;
+    const int topPadding = totalPaddingHeight / 2;
+    const int leftPadding = totalPaddingWidth / 2;
+    //const int bottomPadding = totalPaddingHeight - topPadding;
+    //const int rightPadding = totalPaddingWidth - leftPadding;
+    //printf("%d %d %d %d", topPadding, leftPadding, bottomPadding, rightPadding);
+    /*
+    1 2 3 4 5 6  filter=4x4  => TotPadH=3 => topPad=1 
+    7 8 9 1 2 3                 TotPadW=3    leftPad=1
+    4 5 6 7 8 9                              botPad=2
+    1 2 3 4 5 6                              rightPad=2
+
+    0 0 0 0 0 0 0 0 0
+    0 1 2 3 4 5 6 0 0
+    0 7 8 9 1 2 3 0 0
+    0 4 5 6 7 8 9 0 0 
+    0 1 2 3 4 5 6 0 0
+    0 0 0 0 0 0 0 0 0
+    0 0 0 0 0 0 0 0 0
+
+    for (0,0)= "1" (-1,-1)+(-1,0)+(-1,1)+(-1,2) +
+               "2" (0,-1)+(0,0)+(0,1)+(0,2) +
+               "3" (1,-1)+(1,0)+(1,1)+(1,2) +
+               "4" (2,-1)+(2,0)+(2,1)+(2,2)
+
+    for (3,5)= "1" (3-1,5-1)+(3-1,5)+(3-1,5+1)+(3-1,5+2) +
+               "2" (3,5-1)+(3,5)+(3,5+1)+(3,5+2) +
+               "3" (3+1,5-1)+(3+1,5)+(3+1,5+1)+(3+1,5+2) +
+               "4" (3+2,5-1)+(3+2,5)+(3+2,5+1)+(3+2,5+2)
+
+             = "1" (2,4)+(2,5)+(2,6)+(2,7) +
+               "2" (3,4)+(3,5)+(3,6)+(3,7) +
+               "3" (4,4)+(4,5)+(4,6)+(4,7) + -> all zero (pad)
+               "4" (5,4)+(5,5)+(5,6)+(5,7)   -> all zero (pad)
+    */
+
+    //TODO: reduce repeated computations by storing
+    //Maybe make loop condition handle outside matrix area instead of continue
+    int cnnOffset = offset_GM - topPadding*INPUT_WIDTH - leftPadding;
+    float conv = 0;
+    for (int i = 0; i < filterSize; ++i) {
+        if (y - topPadding + i < 0) continue;
+        if (y - topPadding + i >= INPUT_HEIGHT) {
+            //printf("%d %d %d\n", y, topPadding, i);
+            break;
+        }
+        for (int j = 0; j < filterSize; ++j) {
+            int offset = cnnOffset + i * INPUT_WIDTH + j;
+            if (x - leftPadding + j < 0) continue;
+            if (x - leftPadding + j >= INPUT_WIDTH) break;
+            conv += inCh[cnnOffset + i * INPUT_WIDTH + j] * filter[i * filterSize + j];
+            //printf("%d %d\n", i, j);
+        }
+    }
+
+    outCh[offset_GM] = conv;
+}
+
+/* if can put input into shared memory then can do inplace on input
+__device__ void device_CNN_SHMEM(float *inCh, float *filter, int filterSize) {
+    
+    
     // Position relative to global memory of 2D matrix
     const int x = threadIdx.x + blockIdx.x * blockDim.x;
     const int y = threadIdx.y + blockIdx.y * blockDim.y;
@@ -106,7 +180,7 @@ __device__ void device_CNN(float *inCh, float *outCh, float *filter, int filterS
 
     //TODO: reduce repeated computations by storing
     //Maybe make loop condition handle outside matrix area instead of continue
-    int cnnOffset = offset_GM - topPadding*INPUT_WIDTH - leftPadding;
+   /* int cnnOffset = offset_GM - topPadding*INPUT_WIDTH - leftPadding;
     float conv = 0;
     for (int i = 0; i < filterSize; ++i) {
         for (int j = 0; j < filterSize; ++j) {
@@ -120,7 +194,8 @@ __device__ void device_CNN(float *inCh, float *outCh, float *filter, int filterS
     }
 
     outCh[offset_GM] = conv;
-}
+}*/
+
 
 __global__ void kernel(float *inCh, float *outCh, float *filter, int filterSize) {
     device_CNN(inCh, outCh, filter, filterSize);
@@ -142,6 +217,7 @@ void initData(float *in, int width, int height, int padding) {
 
 void Print2D(float *m, int width, int height) {
     for (int i = 0, row=0; i < height; ++i, row += width) { // Row
+        printf("%d:\t", i);
         for (int j = 0; j < width; ++j) { // Col
             printf("%.6f\t", m[row + j]);
         }
@@ -184,14 +260,14 @@ int main( int argc, char *argv[])
     // Allocate intial input to CNN with padding
     float *h_input = NULL;
     int padding = 0; //getPadding(3);
-    int bytes = allocInput(5, 6, padding, &h_input);
+    int bytes = allocInput(INPUT_WIDTH, INPUT_HEIGHT, padding, &h_input);
     if (bytes == -1) {
         printf("Error: Failed to allocte host memory for input");
         return 1;
     }
 
     float *h_output = NULL;
-    bytes = allocInput(5, 6, padding, &h_output);
+    bytes = allocInput(INPUT_WIDTH, INPUT_HEIGHT, padding, &h_output);
     if (bytes == -1) {
         printf("Error: Failed to allocte host memory for input");
         return 1;
@@ -284,20 +360,9 @@ int main( int argc, char *argv[])
     }*/
     gpuErrchk(cudaDeviceSynchronize());
 
-    //TODO: Data transfer from device to host
-    #ifdef EXTR_TIMING
-    double cpy_from_time = getTimeStamp();
-    #endif
-
     double end_time=getTimeStamp();
 //================= Timing Ends ========================    
     int total_time_ms = (int)ceil((end_time-start_time)*1000);
-    #ifdef EXTR_TIMING
-    int alloc_time_ms = (int)ceil((cpy_to_time-alloc_time)*1000);
-    int cpy_to_time_ms = (int)ceil((kernel_time-cpy_to_time)*1000);
-    int kernel_time_ms = (int)ceil((cpy_from_time-kernel_time)*1000);
-    int cpy_from_time_ms = (int)ceil((end_time-cpy_from_time)*1000);
-    #endif
     
     //TODO: free allocated resources
     gpuErrchk(cudaHostUnregister(h_input));
@@ -307,18 +372,12 @@ int main( int argc, char *argv[])
         gpuErrchk(cudaEventDestroy(events[i]));
     }*/
 
-    //TODO: Computing the sum (not included in timing)
-    //double sumDevice = calculateSum(h_da, n);
 #ifdef PRINTDATA
     printf("Output Data GPU a:\n");
     Print2D(h_output, INPUT_WIDTH + padding, INPUT_HEIGHT + padding);
 #endif
    
-    /*printf("%lf %d\n", sumDevice, total_time_ms);
-#ifdef EXTR_TIMING
-    printf("%d %d %d %d\n", alloc_time_ms, cpy_to_time_ms, kernel_time_ms,
-        cpy_from_time_ms);
-#endif*/
+    printf("Time: %d\n", total_time_ms);
 
     /*for (int i = 0; i < n; ++i) {
         if (lookupB[i] == i) {
