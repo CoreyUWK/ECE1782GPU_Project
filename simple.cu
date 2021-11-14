@@ -9,14 +9,36 @@ Convolution: 4x4 => output 64 channels | Stride=1, Padding=Same | ReLu
 Max Pool: 2x2 | Stride=1, Padding=Same
 Convolution: 2x2 => output 64 channels | Stride=1, Padding=Same | ReLu
 Flatten: to 256 nodes
-Full Connected Linear: in=256, out=3 | ReLu and softmax 
+Full Connected Linear: in=256, out=3 | ReLu and softmax
+
+Convolution Design Ideas:
+1.1) Store filters in constant memory
+- issue: all filters do not fit in constant memory
+( ((8*8)*64 + 64) + ((4*4)*64*64 + 64) + ((2*2)*64*64) + 64) ) *4byte = 344,832bytes= 344.8KB > 64KB
+1.2) Need alternative to constant memory 
+-> maybe pass to kernels GMem and then copy to shared memory with avaliable threads
+
+2) Convolution function takes input matrix and produces output matrix
+2.1) if injecting padding then will need to copy input matrix with padding
+all 56x100 will become + max padding sizes, and kernel will have to know where to start from based on necessary padding for filter size
+2.2) if not injecting padding, handle with if checks.
+However, threads will not be indexed top left of convolution with filter
+- actually can't do inline since can only sync threads per block, not entire 2d matrix, so will have sync issues (data not correct result)
+- unless each thread copy filter area into shared memory or registers, process it, and then sync and write out to original input
+
+3) for multi input channel, perform all filter convolution in input per thread, then write out to ouput (inline or not)
+
+
 */
 #include <stdio.h>
 #include <sys/time.h>
 #include <stdlib.h>
 #include <math.h>
+#include <vector>
+#include <mutex>
+#include <algorithm>
 #include "cnn_weights.cu"
-//#define PRINTDATA 1
+#define PRINTDATA 1
 
 #define INPUT_WIDTH 100
 #define INPUT_HEIGHT 56
@@ -131,13 +153,16 @@ __device__ void device_CNN(float *inCh, float *outCh, float *filter, int filterS
     outCh[offset_GM] = conv;
 }
 
-/* if can put input into shared memory then can do inplace on input
-__device__ void device_CNN_SHMEM(float *inCh, float *filter, int filterSize) {
-    
-    
+/* This will not work as no way to sync threads in grid
+__device__ void device_CNN_inline(float *inCh, float *filter, int filterSize) {
     // Position relative to global memory of 2D matrix
     const int x = threadIdx.x + blockIdx.x * blockDim.x;
     const int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+    if (x >= INPUT_WIDTH || y >= INPUT_HEIGHT) {
+        return;
+    }
+
     const int offset_GM = y * INPUT_WIDTH + x;
 
     // P=max(F−S,0)
@@ -145,57 +170,94 @@ __device__ void device_CNN_SHMEM(float *inCh, float *filter, int filterSize) {
     const int totalPaddingWidth = filterSize - 1;
     const int topPadding = totalPaddingHeight / 2;
     const int leftPadding = totalPaddingWidth / 2;
-    const int bottomPadding = totalPaddingHeight - topPadding;
-    const int rightPadding = totalPaddingWidth - leftPadding;
-    //printf("%d %d %d %d", topPadding, leftPadding, bottomPadding, rightPadding);
-    /*
-    1 2 3 4 5 6  filter=4x4  => TotPadH=3 => topPad=1 
-    7 8 9 1 2 3                 TotPadW=3    leftPad=1
-    4 5 6 7 8 9                              botPad=2
-    1 2 3 4 5 6                              rightPad=2
-
-    0 0 0 0 0 0 0 0 0
-    0 1 2 3 4 5 6 0 0
-    0 7 8 9 1 2 3 0 0
-    0 4 5 6 7 8 9 0 0 
-    0 1 2 3 4 5 6 0 0
-    0 0 0 0 0 0 0 0 0
-    0 0 0 0 0 0 0 0 0
-
-    for (0,0)= "1" (-1,-1)+(-1,0)+(-1,1)+(-1,2) +
-               "2" (0,-1)+(0,0)+(0,1)+(0,2) +
-               "3" (1,-1)+(1,0)+(1,1)+(1,2) +
-               "4" (2,-1)+(2,0)+(2,1)+(2,2)
-
-    for (3,5)= "1" (3-1,5-1)+(3-1,5)+(3-1,5+1)+(3-1,5+2) +
-               "2" (3,5-1)+(3,5)+(3,5+1)+(3,5+2) +
-               "3" (3+1,5-1)+(3+1,5)+(3+1,5+1)+(3+1,5+2) +
-               "4" (3+2,5-1)+(3+2,5)+(3+2,5+1)+(3+2,5+2)
-
-             = "1" (2,4)+(2,5)+(2,6)+(2,7) +
-               "2" (3,4)+(3,5)+(3,6)+(3,7) +
-               "3" (4,4)+(4,5)+(4,6)+(4,7) + -> all zero (pad)
-               "4" (5,4)+(5,5)+(5,6)+(5,7)   -> all zero (pad)
-    */
 
     //TODO: reduce repeated computations by storing
     //Maybe make loop condition handle outside matrix area instead of continue
-   /* int cnnOffset = offset_GM - topPadding*INPUT_WIDTH - leftPadding;
+    int cnnOffset = offset_GM - topPadding*INPUT_WIDTH - leftPadding;
     float conv = 0;
     for (int i = 0; i < filterSize; ++i) {
+        if (y - topPadding + i < 0) continue;
+        if (y - topPadding + i >= INPUT_HEIGHT) {
+            //printf("%d %d %d\n", y, topPadding, i);
+            break;
+        }
         for (int j = 0; j < filterSize; ++j) {
             int offset = cnnOffset + i * INPUT_WIDTH + j;
-            if (x - leftPadding + j < 0 || x - leftPadding + j >= INPUT_WIDTH || 
-                y - topPadding + i < 0 || y - topPadding + i >= INPUT_HEIGHT) 
-                continue;
+            if (x - leftPadding + j < 0) continue;
+            if (x - leftPadding + j >= INPUT_WIDTH) break;
+            conv += inCh[cnnOffset + i * INPUT_WIDTH + j] * filter[i * filterSize + j];
+            //printf("%d %d\n", i, j);
+        }
+    }
+
+    __syncthreads();
+    inCh[offset_GM] = conv;
+}*/
+#ifdef SHMEM
+// Need to used shared memory to store filters as doesn't fit into constant memory
+__device__ void device_CNN_SHMEM_NotOpt(float *inCh, float *filter, int filterSize) {   
+    /* Shared Memory Layout:
+    000...000 
+    000...000
+    000111000 <- place block of inCh here, but will have to place padding area for block edges handling 
+    000111000
+    000111000
+    000111000
+    000...000
+    000...000
+    
+    */
+    extern __shared__ float sData[];
+    
+    // Position relative to global memory of 2D matrix
+    const int x = threadIdx.x + blockIdx.x * blockDim.x;
+    const int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+    if (x >= INPUT_WIDTH || y >= INPUT_HEIGHT) {
+        return;
+    }
+
+    const int totalPaddingHeight = filterSize - 1;
+    const int totalPaddingWidth = filterSize - 1;
+    const int topPadding = totalPaddingHeight / 2;
+    const int leftPadding = totalPaddingWidth / 2;
+    const int bottomPadding = totalPaddingHeight - topPadding;
+    const int rightPadding = totalPaddingWidth - leftPadding;
+
+    int totalPadding = totalPaddingHeight * blockDim.x + totalPaddingWidth * blockDim.y + // sides
+                    totalPaddingHeight*totalPaddingWidth; // Corners
+    float *sInCh = sData;
+    float *sfilter = sData + blockDim.x * blockDim.y + totalPadding;
+
+    const int offset_GM = y * INPUT_WIDTH + x;
+
+    // Every Thread in block copies it's value
+    sData[] = in[offset_GM];
+
+
+    //TODO: reduce repeated computations by storing
+    //Maybe make loop condition handle outside matrix area instead of continue
+    int cnnOffset = offset_GM - topPadding*INPUT_WIDTH - leftPadding;
+    
+    float conv = 0;
+    for (int i = 0; i < filterSize; ++i) {
+        if (y - topPadding + i < 0) continue;
+        if (y - topPadding + i >= INPUT_HEIGHT) {
+            //printf("%d %d %d\n", y, topPadding, i);
+            break;
+        }
+        for (int j = 0; j < filterSize; ++j) {
+            int offset = cnnOffset + i * INPUT_WIDTH + j;
+            if (x - leftPadding + j < 0) continue;
+            if (x - leftPadding + j >= INPUT_WIDTH) break;
             conv += inCh[cnnOffset + i * INPUT_WIDTH + j] * filter[i * filterSize + j];
             //printf("%d %d\n", i, j);
         }
     }
 
     outCh[offset_GM] = conv;
-}*/
-
+}
+#endif
 
 __global__ void kernel(float *inCh, float *outCh, float *filter, int filterSize) {
     device_CNN(inCh, outCh, filter, filterSize);
@@ -229,171 +291,273 @@ int getPadding(int filter) {
     return filter / 2;
 }
 
-int allocInput(int width, int height, int padding, float **out) {
-    size_t input_num_elements = (width + padding) * (height + padding);
-    size_t bytes = input_num_elements * sizeof(float);
+float* allocHostBlock(std::vector<float*> &h_freeBlocks, std::mutex &h_freeBlocksMutex, int bytes) {
+    float *mem = NULL;
 
-    *out = (float *)malloc(bytes);
-    if (NULL == *out) {
-        return -1;
+    h_freeBlocksMutex.lock();
+    if (!h_freeBlocks.empty()) {
+        mem = h_freeBlocks.back();
+        h_freeBlocks.pop_back();
+    }
+    h_freeBlocksMutex.unlock();
+    if (mem == NULL) {
+        mem = (float *)malloc(bytes);
     }
 
-    initData(*out, width + padding, height + padding, padding);
-    
-    return bytes;
+    return mem;
 }
 
-void setUpCNNFilters() {
-    gpuErrchk(cudaMemcpyToSymbol(device_cov1_b, &host_cov1_b, sizeof(float)));
-    gpuErrchk(cudaMemcpyToSymbol(device_cov1_filter1, host_cov1_filter1, COV1_FILTER_N*COV1_FILTER_N*sizeof(float)));
-    gpuErrchk(cudaMemcpyToSymbol(device_cov1_filter2, host_cov1_filter2, COV1_FILTER_N*COV1_FILTER_N*sizeof(float)));
-    gpuErrchk(cudaMemcpyToSymbol(device_cov1_filter3, host_cov1_filter3, COV1_FILTER_N*COV1_FILTER_N*sizeof(float)));
-    gpuErrchk(cudaMemcpyToSymbol(device_cov1_filter4, host_cov1_filter4, COV1_FILTER_N*COV1_FILTER_N*sizeof(float)));
-    gpuErrchk(cudaMemcpyToSymbol(device_cov1_filter5, host_cov1_filter5, COV1_FILTER_N*COV1_FILTER_N*sizeof(float)));
-    gpuErrchk(cudaMemcpyToSymbol(device_cov1_filter6, host_cov1_filter6, COV1_FILTER_N*COV1_FILTER_N*sizeof(float)));
-    gpuErrchk(cudaMemcpyToSymbol(device_cov1_filter7, host_cov1_filter7, COV1_FILTER_N*COV1_FILTER_N*sizeof(float)));
-    gpuErrchk(cudaMemcpyToSymbol(device_cov1_filter8, host_cov1_filter8, COV1_FILTER_N*COV1_FILTER_N*sizeof(float)));
+float* allocDeviceBlock(std::vector<float*> &d_freeBlocks, std::mutex &d_freeBlocksMutex, int bytes) {
+    float *mem = NULL;
+
+    d_freeBlocksMutex.lock();
+    if (!d_freeBlocks.empty()) {
+        mem = d_freeBlocks.back();
+        d_freeBlocks.pop_back();
+    }
+    d_freeBlocksMutex.unlock();
+    if (mem == NULL) {
+        gpuErrchk(cudaMalloc((void **)&mem, bytes));
+    }
+
+    return mem;
 }
+
+void setUpCNNFilters(float *host_cov_b, float * host_cov_filter, cudaStream_t stream) {
+    gpuErrchk( cudaMemcpyToSymbolAsync(device_cov1_b, host_cov_b, COV1_FILTER_OUT_CH*sizeof(float), 
+        0, cudaMemcpyHostToDevice, stream) );
+
+    gpuErrchk( cudaMemcpyToSymbolAsync(device_cov1_filter, host_cov_filter, 
+        COV1_FILTER_IN_CH * COV1_FILTER_OUT_CH * COV1_FILTER_N*COV1_FILTER_N*sizeof(float), 
+        0, cudaMemcpyHostToDevice, stream));
+}
+
+void setupFilterCh(int ch, float *host_cov_b, float *host_cov_filter, cudaStream_t stream) {
+    int size = sizeof(float);
+    gpuErrchk( cudaMemcpyToSymbolAsync(device_cov1_b, host_cov_b, size, 
+        ch*size, cudaMemcpyHostToDevice, stream) );
+
+    size = COV1_FILTER_N*COV1_FILTER_N*sizeof(float);
+    gpuErrchk( cudaMemcpyToSymbolAsync(device_cov1_filter, host_cov_filter, size, 
+        ch * size, cudaMemcpyHostToDevice, stream) );
+}
+
+void layer1_cov1(int bytes, dim3 grid, dim3 block,
+    float *h_input, float *d_input, float **d_output,
+    std::vector<float*> &d_freeBlocks, std::mutex &d_freeBlocksMutex,
+    std::vector<cudaStream_t> &freeStreams, std::mutex &freeStreamsMutex) {
+    
+    cudaStream_t streams[COV1_FILTER_OUT_CH];
+    cudaEvent_t event;
+    gpuErrchk(cudaEventCreate(&event));
+
+    float *filterAddr;
+    gpuErrchk(cudaGetSymbolAddress((void**)&filterAddr, device_cov1_filter));
+
+    bool got = false;
+    for (int i=0; i < COV1_FILTER_OUT_CH; ++i) {
+        // Get Stream
+        got = false;
+        freeStreamsMutex.lock();
+        if (!freeStreams.empty()) {
+            got = true;
+            streams[i] = freeStreams.back();
+            freeStreams.pop_back();
+        }
+        freeStreamsMutex.unlock();
+        if (!got) { 
+            gpuErrchk(cudaStreamCreate(&streams[i]));
+        }
+    
+        // Copy over input
+        if (i == 0) {
+            // Performing async for implementation of multiple CNNs running in parallel for server
+    
+            // Copy over input
+            gpuErrchk(cudaMemcpyAsync(d_input, h_input, bytes, cudaMemcpyHostToDevice, streams[i]));
+            gpuErrchk(cudaEventRecord(event, streams[i]));
+        }
+        // Every stream needs to wait for input
+        if (i > 0) // input cpy and first filter run on same stream so skip on first stream 
+            gpuErrchk(cudaStreamWaitEvent(streams[i], event));
+
+        // Setup all filters and b
+        setupFilterCh(i, &host_cov1_b[i], &host_cov1_filter[0][i][0][0], streams[i]);
+
+        // Get output memory
+        got = false;
+        d_freeBlocksMutex.lock();
+        if (!d_freeBlocks.empty()) {
+            got = true;
+            d_output[i] = d_freeBlocks.back();
+            d_freeBlocks.pop_back();
+        }
+        d_freeBlocksMutex.unlock();
+        if (!got) {
+            gpuErrchk(cudaMalloc((void **)&d_output[i], bytes));
+        }
+
+        kernel<<<grid, block, 0, streams[i]>>>(d_input, d_output[i], filterAddr + i*COV1_FILTER_N*COV1_FILTER_N, COV1_FILTER_N);
+        
+        // If want output then need to copy back to host memory
+        //gpuErrchk(cudaMemcpyAsync(&out[i], &d_output[i], bytes, cudaMemcpyDeviceToHost, streams[i]));
+    }
+
+    // Wait for output on stream
+    for (int i=0; i < COV1_FILTER_OUT_CH; ++i) {
+        gpuErrchk(cudaStreamSynchronize(streams[i]));
+        // gpuErrchk(cudaStreamDestroy(streams[i]));
+
+        freeStreamsMutex.lock();
+        freeStreams.push_back(streams[i]);
+        freeStreamsMutex.unlock();
+    }
+
+    gpuErrchk(cudaEventDestroy(event));
+
+    /*d_freeBlocksMutex.lock();
+    // Add device input to list of free blocks
+    d_freeBlocks.push_back(d_input);
+    d_freeBlocksMutex.unlock();*/
+}
+
 
 int main( int argc, char *argv[])
-{    
-    // Allocate intial input to CNN with padding
-    float *h_input = NULL;
-    int padding = 0; //getPadding(3);
-    int bytes = allocInput(INPUT_WIDTH, INPUT_HEIGHT, padding, &h_input);
-    if (bytes == -1) {
-        printf("Error: Failed to allocte host memory for input");
-        return 1;
-    }
+{   
+    // TODO: maybe don't need mutex and change vector to queue
+    std::vector<float*> d_freeBlocks;
+    std::mutex d_freeBlocksMutex;
 
-    float *h_output = NULL;
-    bytes = allocInput(INPUT_WIDTH, INPUT_HEIGHT, padding, &h_output);
-    if (bytes == -1) {
-        printf("Error: Failed to allocte host memory for input");
-        return 1;
-    }
+    std::vector<float*> h_freeBlocks;
+    std::mutex h_freeBlocksMutex;
 
+    std::vector<cudaStream_t> freeStreams;
+    std::mutex freeStreamsMutex;
+
+    int blockSize = INPUT_HEIGHT*INPUT_WIDTH;
+    int bytes = blockSize * sizeof(float);
     
-#ifdef PRINTDATA
-    printf("Input:\n");
-    Print2D(h_input, INPUT_WIDTH + padding, INPUT_HEIGHT + padding);
-#endif
-    
+    // Setup filter values
+    std::fill(&host_cov1_b[0], &host_cov1_b[0] + COV1_FILTER_OUT_CH, 1.0);
+    std::fill(&host_cov1_filter[0][0][0][0], &host_cov1_filter[0][0][0][0] + COV1_FILTER_IN_CH * COV1_FILTER_OUT_CH * COV1_FILTER_N * COV1_FILTER_N, 1.0);
+
     gpuErrchk(cudaDeviceReset());
 
+    // Allocate intial input to CNN
+    float *h_input = allocHostBlock(h_freeBlocks, h_freeBlocksMutex, bytes);
+    if (h_input == NULL) {
+        printf("Error: Failed to allocte host memory for input");
+        return 1;
+    }
+    initData(h_input, INPUT_WIDTH, INPUT_HEIGHT, 0);
+    float *d_input = allocDeviceBlock(d_freeBlocks, d_freeBlocksMutex, bytes);
+    if (d_input == NULL) {
+        printf("Error: Failed to allocte host memory for input");
+        return 1;
+    }
+
+#ifdef PRINTDATA
+    // Allocate host output to print results for debugging
+    float *h_output[COV1_FILTER_OUT_CH];
+    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
+        h_output[ch] = allocHostBlock(h_freeBlocks, h_freeBlocksMutex, bytes);
+        if (h_output[ch] == NULL) {
+            printf("Error: Failed to allocte host memory for output ch %d", ch);
+            //TODO: need to clean up allocated upto this point
+            return 1;
+        }
+    }
+    // Pinning host memory so pages are not paged to disk for DMA to work
+    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
+        gpuErrchk(cudaHostRegister(h_output[ch], bytes, 0));
+    }
+
+    printf("Input:\n");
+    Print2D(h_input, INPUT_WIDTH, INPUT_HEIGHT);
+#endif
+    
     // Pinning host memory so pages are not paged to disk for DMA to work
     gpuErrchk(cudaHostRegister(h_input, bytes, 0));
-    gpuErrchk(cudaHostRegister(h_output, bytes, 0));
 
-    dim3 block((INPUT_WIDTH + padding < 32) ? INPUT_WIDTH + padding : 32, (INPUT_HEIGHT + padding < 32) ? INPUT_HEIGHT + padding : 32); 
-    dim3 grid( (INPUT_WIDTH + padding + block.x-1) / block.x, 
-               (INPUT_HEIGHT + padding + block.y-1) / block.y);
-
-    const int CNN_Layers = 5;
-    const int Cov_Channels = 64;
-    const int NumMatrixPerCNN = 1 + Cov_Channels*5; // Number of input sized matrix used in layer
-    float *d_input;
+    dim3 block((INPUT_WIDTH < 32) ? INPUT_WIDTH : 32, (INPUT_HEIGHT < 32) ? INPUT_HEIGHT : 32); 
+    dim3 grid( (INPUT_WIDTH + block.x-1) / block.x, 
+               (INPUT_HEIGHT + block.y-1) / block.y);
 
 //================= Timing Begins ========================
     double start_time=getTimeStamp();
 
+    /* For simple testing of convolution kernel
     setUpCNNFilters();
-
-    // Get Memory for Data Input
-    gpuErrchk(cudaMalloc((void **)&d_input, bytes));
-    // Copy over input
-    gpuErrchk(cudaMemcpy(d_input, h_input, bytes, cudaMemcpyHostToDevice));
-
+    double constMemFilter_time = getTimeStamp();
     float *d_output;
     gpuErrchk(cudaMalloc((void **)&d_output, bytes));
     float *filterAddr;
-    gpuErrchk(cudaGetSymbolAddress((void**)&filterAddr, device_cov1_filter1));
+    gpuErrchk(cudaGetSymbolAddress((void**)&filterAddr, device_cov1_filter));
     kernel<<<grid, block>>>(d_input, d_output, filterAddr, COV1_FILTER_N);
-    gpuErrchk(cudaMemcpy(h_output, d_output, bytes, cudaMemcpyDeviceToHost));
+    gpuErrchk(cudaMemcpy(h_output, d_output, bytes, cudaMemcpyDeviceToHost));*/
 
-    /*for (int layer = 0; layer < CNN_Layers; ++layer) {
+    // Perform First convolution layer
+    float *d_cov1_out[COV1_FILTER_OUT_CH];
+    layer1_cov1(bytes, grid, block, h_input, d_input, d_cov1_out,  
+        d_freeBlocks, d_freeBlocksMutex,
+        freeStreams, freeStreamsMutex);
+
+    // Input Not needed anymore by device
+    gpuErrchk(cudaHostUnregister(h_input));
+    free(h_input);
+
+#ifdef PRINTDATA
+    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
+        gpuErrchk(cudaMemcpyAsync(h_output[ch], d_cov1_out[ch], bytes, cudaMemcpyDeviceToHost, 
+            freeStreams[ch]));
+    }
+    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
+        // Need to wait for stream to complete copy
+        gpuErrchk(cudaStreamSynchronize(freeStreams[ch]));
+        gpuErrchk(cudaHostUnregister(h_output[ch]));
         
+        printf("Output ch%d:\n", ch);
+        Print2D(h_output[ch], INPUT_WIDTH, INPUT_HEIGHT);
 
-        for (int i = 0, offset=0; i < Cov_Channels; ++i, offset += size2D) {
-            // Get Memory for Layer channel process
-                gpuErrchk(cudaMalloc((void **)&d_input[i], bytes));
-
-            // Wait for previous layer to complete for channel
-            int prevI = i-1;
-            int prevStreamId = (i % (NumStream - 1)) + 1;
-            //printf("%d:%d ", i, prevStreamId);
-            gpuErrchk(cudaStreamWaitEvent(stream[prevStreamId], events[i]));
-    
-            // Get Memory for A
-            if (queueA[endA] == -1) {
-                gpuErrchk(cudaMalloc((void **)&d_a[prevI], size2DBytes));
-                lookupA[prevI] = prevI;
-            }
-            else {
-                lookupA[prevI] = queueA[endA];
-                queueA[endA] = -1;
-                if (0 < endA) --endA;
-            }
-
-            // Process Prev Slice
-#ifdef SHAREDMEMORY
-            kernel_device<<<grid, block, sharedMem, stream[prevStreamId]>>>(d_b[lookupB[prevI]], d_a[lookupA[prevI]], 
-                    (1 < i) ? d_b[lookupB[i-2]] : NULL, d_b[lookupB[i]], n); //, prevI
-#else
-            kernel_device<<<grid, block, 0, stream[prevStreamId]>>>(d_b[lookupB[prevI]], d_a[lookupA[prevI]], 
-                    (1 < i) ? d_b[lookupB[i-2]] : NULL, d_b[lookupB[i]], n);
-#endif
-
-            // Copy back Processed Slice
-            gpuErrchk(cudaMemcpyAsync(&h_da[offset - size2D], d_a[lookupA[prevI]], size2DBytes, cudaMemcpyDeviceToHost, 
-                stream[prevStreamId]));
-
-            // Release memory when done
-            params[i].i = i; params[i].prevI = prevI;
-            cudaStreamAddCallback(stream[prevStreamId], callbackProcessFinished, (void*)&params[i], 0);
-        }
+        free(h_output[ch]);
     }
 
-    for (int i = 1; i < NumStream; ++i) {
-        gpuErrchk(cudaStreamSynchronize(stream[i]));
-        gpuErrchk(cudaStreamDestroy(stream[i]));
-    }*/
-    gpuErrchk(cudaDeviceSynchronize());
+#endif
+
+    d_freeBlocksMutex.lock();
+    // Add device input to list of free blocks
+    d_freeBlocks.push_back(d_input);
+    d_input = NULL;
+    
+    // Add device output to list of free blocks
+    for (int i=0; i < COV1_FILTER_OUT_CH; ++i) {
+        d_freeBlocks.push_back(d_cov1_out[i]);
+    }
+    d_freeBlocksMutex.unlock();
 
     double end_time=getTimeStamp();
 //================= Timing Ends ========================    
     int total_time_ms = (int)ceil((end_time-start_time)*1000);
+    //int constMemFilter_time_ms = (int)ceil((constMemFilter_time - start_time)*1000);
     
-    //TODO: free allocated resources
-    gpuErrchk(cudaHostUnregister(h_input));
-    gpuErrchk(cudaHostUnregister(h_output));
+    printf("Total Time: %d\n", total_time_ms);
+    //printf("Filter Cpy Time: %d\n", constMemFilter_time_ms);
 
-    /*for (int i = 0; i < n; ++i) {
-        gpuErrchk(cudaEventDestroy(events[i]));
-    }*/
+    // Clean up streams -> Error: invalid device context simple.cu 520
+    while (!freeStreams.empty()) {
+        cudaStream_t stream = freeStreams.back();
+        freeStreams.pop_back();
+        gpuErrchk(cudaStreamDestroy(stream));
+    }
 
-#ifdef PRINTDATA
-    printf("Output Data GPU a:\n");
-    Print2D(h_output, INPUT_WIDTH + padding, INPUT_HEIGHT + padding);
-#endif
-   
-    printf("Time: %d\n", total_time_ms);
-
-    /*for (int i = 0; i < n; ++i) {
-        if (lookupB[i] == i) {
-            gpuErrchk(cudaFree(d_b[i]));
-        }
-        if (lookupA[i] == i) {
-            gpuErrchk(cudaFree(d_a[i]));
-        }
-    }*/
-    gpuErrchk(cudaFree(d_input));
-    gpuErrchk(cudaFree(d_output));
+    // Clean up device blocks
+    while (!d_freeBlocks.empty()) {
+        float * block = d_freeBlocks.back();
+        d_freeBlocks.pop_back();
+        gpuErrchk(cudaFree(block));
+    }
 
     gpuErrchk(cudaDeviceReset());
-
-    free(h_input);
-    free(h_output);
 
     return 0;
 }
