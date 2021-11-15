@@ -82,7 +82,7 @@ For F = 8x8
 P = (8 - 1)/2 = 3.5 = 
 
 */
-__device__ void device_CNN(float *inCh, float *outCh, float *filter, int filterSize) {
+__device__ void device_CNN(float *inCh, float *outCh, float b, float *filter, int filterSize) {
     // Position relative to global memory of 2D matrix
     const int x = threadIdx.x + blockIdx.x * blockDim.x;
     const int y = threadIdx.y + blockIdx.y * blockDim.y;
@@ -150,49 +150,10 @@ __device__ void device_CNN(float *inCh, float *outCh, float *filter, int filterS
         }
     }
 
-    outCh[offset_GM] = conv;
+    outCh[offset_GM] = conv + b;
 }
 
-/* This will not work as no way to sync threads in grid
-__device__ void device_CNN_inline(float *inCh, float *filter, int filterSize) {
-    // Position relative to global memory of 2D matrix
-    const int x = threadIdx.x + blockIdx.x * blockDim.x;
-    const int y = threadIdx.y + blockIdx.y * blockDim.y;
 
-    if (x >= INPUT_WIDTH || y >= INPUT_HEIGHT) {
-        return;
-    }
-
-    const int offset_GM = y * INPUT_WIDTH + x;
-
-    // P=max(F−S,0)
-    const int totalPaddingHeight = filterSize - 1;
-    const int totalPaddingWidth = filterSize - 1;
-    const int topPadding = totalPaddingHeight / 2;
-    const int leftPadding = totalPaddingWidth / 2;
-
-    //TODO: reduce repeated computations by storing
-    //Maybe make loop condition handle outside matrix area instead of continue
-    int cnnOffset = offset_GM - topPadding*INPUT_WIDTH - leftPadding;
-    float conv = 0;
-    for (int i = 0; i < filterSize; ++i) {
-        if (y - topPadding + i < 0) continue;
-        if (y - topPadding + i >= INPUT_HEIGHT) {
-            //printf("%d %d %d\n", y, topPadding, i);
-            break;
-        }
-        for (int j = 0; j < filterSize; ++j) {
-            int offset = cnnOffset + i * INPUT_WIDTH + j;
-            if (x - leftPadding + j < 0) continue;
-            if (x - leftPadding + j >= INPUT_WIDTH) break;
-            conv += inCh[cnnOffset + i * INPUT_WIDTH + j] * filter[i * filterSize + j];
-            //printf("%d %d\n", i, j);
-        }
-    }
-
-    __syncthreads();
-    inCh[offset_GM] = conv;
-}*/
 #ifdef SHMEM
 // Need to used shared memory to store filters as doesn't fit into constant memory
 __device__ void device_CNN_SHMEM_NotOpt(float *inCh, float *filter, int filterSize) {   
@@ -259,9 +220,10 @@ __device__ void device_CNN_SHMEM_NotOpt(float *inCh, float *filter, int filterSi
 }
 #endif
 
-__global__ void kernel(float *inCh, float *outCh, float *filter, int filterSize) {
-    device_CNN(inCh, outCh, filter, filterSize);
+__global__ void kernel(float *inCh, float *outCh, float b, float *filter, int filterSize) {
+    device_CNN(inCh, outCh, b, filter, filterSize);
 }
+
 
 // Generate Input Data
 void initData(float *in, int width, int height, int padding) {
@@ -397,7 +359,7 @@ void layer1_cov1(int bytes, dim3 grid, dim3 block,
             gpuErrchk(cudaMalloc((void **)&d_output[i], bytes));
         }
 
-        kernel<<<grid, block, 0, streams[i]>>>(d_input, d_output[i], filterAddr + i*COV1_FILTER_N*COV1_FILTER_N, COV1_FILTER_N);
+        kernel<<<grid, block, 0, streams[i]>>>(d_input, d_output[i], host_cov1_b[i], filterAddr + i*COV1_FILTER_N*COV1_FILTER_N, COV1_FILTER_N);
         
         // If want output then need to copy back to host memory
         //gpuErrchk(cudaMemcpyAsync(&out[i], &d_output[i], bytes, cudaMemcpyDeviceToHost, streams[i]));
