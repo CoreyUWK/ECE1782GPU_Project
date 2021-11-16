@@ -1,8 +1,9 @@
+#include <cmath>
 #include <algorithm>
 #include <stdio.h>
 #include <sys/time.h>
 
-#define PAD_VALUE -std::numeric_limits<float>::infinity()
+#define PAD_VALUE -INFINITY
 #define MAX_TOL 1e-3
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
@@ -66,7 +67,7 @@ void host_max_pool_2d(float *X, float *Y, int n_rows, int n_cols, int kx, int ky
                   X[addr]
                   : PAD_VALUE;
 
-              output_element = std::max(output_element, current_element);
+              output_element = max(output_element, current_element);
             }
           }
 
@@ -79,6 +80,34 @@ void host_max_pool_2d(float *X, float *Y, int n_rows, int n_cols, int kx, int ky
 
 __global__ void max_pool_2d(float *X, float *Y, int n_rows, int n_cols, int kx, int ky) {
     // padding=1, stride=1
+
+    unsigned int o_col = blockDim.x * blockIdx.x + threadIdx.x;
+    unsigned int o_row = blockDim.y * blockIdx.y + threadIdx.y;
+
+    float out_element = PAD_VALUE;
+    float current_element;
+
+    unsigned int addr;
+
+    if ((o_col >= n_cols) || (o_row >= n_rows)) {
+        return;
+    }
+
+    for (int i_col = o_col; i_col < o_col + kx; i_col++) {
+        for (int i_row = o_row; i_row < o_row + ky; i_row++) {
+            current_element = 
+                // padding
+                (i_col < n_cols && i_row < n_rows)
+                ? X[i_row * n_cols + i_col]
+                : PAD_VALUE;
+
+            if (current_element > out_element)
+                out_element = current_element;
+        }
+    }
+
+    addr = o_row * n_cols + o_col;
+    Y[addr] = out_element;
 }
 
 int main(int argc, char *argv[]) {
@@ -114,8 +143,8 @@ int main(int argc, char *argv[]) {
     gpuErrchk(cudaMalloc((void **) &d_Y, n_bytes));
 
     initData(h_X, n_rows, n_cols);
-    printf("X:\n");
-    printMatrix(h_X, n_rows, n_cols);
+    // printf("X:\n");
+    // printMatrix(h_X, n_rows, n_cols);
 
     gpuErrchk(cudaMemcpy(d_X, h_X, n_bytes, cudaMemcpyHostToDevice));
 
@@ -132,17 +161,17 @@ int main(int argc, char *argv[]) {
     // printf("Y:\n");
     // printMatrix(h_hY, n_rows, n_cols);
 
-    // for (int i = 0; i < n_elements; i++) {
-    //     if (fabs(h_hY[i] - h_dY[i]) >= MAX_TOL) {
-    //         printf(
-    //             "Error: Result mismatch at offset: %d. Expected: %f, Got: %f\n",
-    //             i,
-    //             h_hY[i],
-    //             h_dY[i]
-    //         );
-    //         return -1;
-    //     }
-    // }
+    for (int i = 0; i < n_elements; i++) {
+        if (fabs(h_hY[i] - h_dY[i]) >= MAX_TOL) {
+            printf(
+                "Error: Result mismatch at offset: %d. Expected: %f, Got: %f\n",
+                i,
+                h_hY[i],
+                h_dY[i]
+            );
+            return -1;
+        }
+    }
 
     printf("Elapsed: %d ms\n", total_time_ms);
 
