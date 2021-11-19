@@ -6,9 +6,9 @@
 #define PAD_VALUE -INFINITY
 #define MAX_TOL 1e-3
 
-#define KX 2
-#define KY 2
-#define STRIDE 2
+#define KX 3
+#define KY 3
+#define STRIDE 3
 
 #define DEBUG
 
@@ -36,7 +36,8 @@ void initData(float *M, int n_rows, int n_cols) {
     for (int i = 0; i < n_rows; i++) {
         for (int j = 0; j < n_cols; j++) {
             offset = (i * n_cols) + j;
-            M[offset] = (i + j) % 2 == 0 ? -(i+j) : (i + j);
+            // M[offset] = (i + j) % 2 == 0 ? -(i+j) : (i + j);
+            M[offset] = i * n_cols + j;
         }
     }
 }
@@ -55,15 +56,22 @@ void printMatrix(float *M, int n_rows, int n_cols) {
 void host_max_pool_2d(
         float *X,
         float *Y,
-        unsigned int in_rows,
-        unsigned int in_cols,
-        unsigned int out_rows,
-        unsigned int out_cols,
-        unsigned int kx,
-        unsigned int ky,
-        unsigned int s  // stride
+        int in_rows,
+        int in_cols,
+        int kx,  // kernel size
+        int ky,  // kernel size
+        int s  // stride
     ) {
     // padding=same
+
+    int out_rows = (in_rows - 1) / s + 1;
+    int out_cols = (in_cols - 1) / s + 1;
+
+    int px_pre = (in_cols % s == 0) ? max(kx - s, 0) : max(kx - in_cols % s, 0);
+    int py_pre = (in_rows % s == 0) ? max(ky - s, 0) : max(ky - in_rows % s, 0);
+
+    px_pre /= 2;
+    py_pre /= 2;
 
     for (int o_y = 0; o_y < out_rows; o_y++) {
         for (int o_x = 0; o_x < out_cols; o_x++) {
@@ -72,17 +80,18 @@ void host_max_pool_2d(
           float current_element;
           int addr;
 
+          int i_y_min = o_y * s - py_pre;
+          int i_x_min = o_x * s - px_pre;
+
           // input dimensions
-          for (int i_y = (int)(o_y * s - ky / 2); i_y < (int)(o_y * s + ky / 2 + 1); i_y++) {
-              for (int i_x = (int)(o_x * s - kx / 2); i_x < (int)(o_x * s + kx / 2 + 1); i_x++) {
+          for (int i_y = i_y_min; i_y < i_y_min + ky; i_y++) {
+              for (int i_x = i_x_min; i_x < i_x_min + kx; i_x++) {
 
                   addr = i_y * in_cols + i_x;
 
-                  current_element =
-                      // padding
-                      (i_x >= 0 && i_x < in_cols && i_y >= 0 && i_y < in_rows) ?
-                      X[addr]
-                      : PAD_VALUE;
+                  current_element = (
+                      i_x >= 0 && i_x < in_cols && i_y >= 0 && i_y < in_rows
+                  ) ? X[addr] : PAD_VALUE;
 
                   output_element = max(output_element, current_element);
               }
@@ -98,30 +107,38 @@ void host_max_pool_2d(
 __global__ void max_pool_2d(
         float *X,
         float *Y,
-        unsigned int in_rows,
-        unsigned int in_cols,
-        unsigned int out_rows,
-        unsigned int out_cols,
-        unsigned int kx,
-        unsigned int ky,
-        unsigned int s
+        int in_rows,
+        int in_cols,
+        int kx,
+        int ky,
+        int s
     ) {
-    // padding=same
     unsigned int o_col = blockDim.x * blockIdx.x + threadIdx.x;
     unsigned int o_row = blockDim.y * blockIdx.y + threadIdx.y;
 
     float out_element = PAD_VALUE;
     float current_element;
-
     unsigned int addr;
+
+    int out_rows = (in_rows - 1) / s + 1;
+    int out_cols = (in_cols - 1) / s + 1;
 
     if ((o_col >= out_cols) || (o_row >= out_rows)) {
         return;
     }
 
-    for (int i_col = (int)(o_col * s - kx / 2); i_col < (int)(o_col * s + kx / 2 + 1); i_col++) {
-        for (int i_row = (int)(o_row * s - ky / 2); i_row < (int)(o_row * s + ky / 2 + 1); i_row++) {
+    // Implement padding=same from tensorflow
+    int px_pre = (in_cols % s == 0) ? max(kx - s, 0) : max(kx - in_cols % s, 0);
+    int py_pre = (in_rows % s == 0) ? max(ky - s, 0) : max(ky - in_rows % s, 0);
+    px_pre /= 2;
+    py_pre /= 2;
 
+    int i_y_min = o_row * s - py_pre;
+    int i_x_min = o_col * s - px_pre;
+
+
+    for (int i_col = i_x_min; i_col < i_x_min + kx; i_col++) {
+        for (int i_row = i_y_min; i_row < i_y_min + ky; i_row++) {
             addr = i_row * in_cols + i_col;
 
             current_element = (
@@ -153,8 +170,8 @@ int main(int argc, char *argv[]) {
     int in_elements = in_rows * in_cols;
     int in_bytes = in_elements * sizeof(float);
 
-    unsigned int out_cols = ceil((in_cols) / STRIDE);
-    unsigned int out_rows = ceil((in_rows) / STRIDE);
+    unsigned int out_cols = (in_cols - 1) / STRIDE + 1;
+    unsigned int out_rows = (in_rows - 1) / STRIDE + 1;
 
     int out_elements = out_rows * out_cols;
     int out_bytes = out_elements * sizeof(float);
@@ -189,16 +206,14 @@ int main(int argc, char *argv[]) {
     dim3 grid(
             (out_cols + block.x - 1) / block.x,
             (out_rows + block.y - 1) / block.y);
-    max_pool_2d<<<grid, block>>>(
-            d_X, d_Y, in_rows, in_cols, out_rows, out_cols, KX, KY, STRIDE);
+    max_pool_2d<<<grid, block>>>(d_X, d_Y, in_rows, in_cols, KX, KY, STRIDE);
 
     gpuErrchk(cudaMemcpy(h_dY, d_Y, out_bytes, cudaMemcpyDeviceToHost));
 
     double end_time = getTimeStamp();
     int total_time_ms = (int) ceil((end_time - start_time) * 1000);
 
-    host_max_pool_2d(
-            h_X, h_hY, in_rows, in_cols, out_rows, out_cols, KX, KY, STRIDE);
+    host_max_pool_2d(h_X, h_hY, in_rows, in_cols, KX, KY, STRIDE);
 
 #ifdef DEBUG
     printf("Y:\n");
