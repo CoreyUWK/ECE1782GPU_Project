@@ -1,6 +1,7 @@
 /*
 * ECE1782 - Fall 2021 - Project
 * nvcc -arch sm_52 -Xptxas="-v" final.cu
+nvcc simple.cu -ccbin g++ --std=c++11 -lpthread
 
 Input: 56x100
 Convolution: 8x8 => output 64 channels | Stride=1, Padding=Same | ReLu
@@ -38,10 +39,13 @@ However, threads will not be indexed top left of convolution with filter
 #include <mutex>
 #include <algorithm>
 #include "cnn_weights.cu"
-#define PRINTDATA 1
+//#define PRINTDATA 1
+#define EnableLock 1
 
-#define INPUT_WIDTH 100
-#define INPUT_HEIGHT 56
+#define INPUT_WIDTH 2048//100
+#define INPUT_HEIGHT 2048//56
+
+#define NUM_STREAM 16
 
 /*You can use the following for any CUDA function that returns cudaError_t type*/
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
@@ -82,7 +86,8 @@ For F = 8x8
 P = (8 - 1)/2 = 3.5 = 
 
 */
-__device__ void device_CNN(float *inCh, float *outCh, float b, float *filter, int filterSize) {
+__device__ void device_CNN(float *inCh, float *outCh, float b, float *filter, int filterSize,
+    int totalPaddingHeight, int totalPaddingWidth, int topPadding, int leftPadding) {
     // Position relative to global memory of 2D matrix
     const int x = threadIdx.x + blockIdx.x * blockDim.x;
     const int y = threadIdx.y + blockIdx.y * blockDim.y;
@@ -94,10 +99,10 @@ __device__ void device_CNN(float *inCh, float *outCh, float b, float *filter, in
     const int offset_GM = y * INPUT_WIDTH + x;
 
     // P=max(F−S,0)
-    const int totalPaddingHeight = filterSize - 1;
-    const int totalPaddingWidth = filterSize - 1;
-    const int topPadding = totalPaddingHeight / 2;
-    const int leftPadding = totalPaddingWidth / 2;
+    // const int totalPaddingHeight = filterSize - 1;
+    // const int totalPaddingWidth = filterSize - 1;
+    // const int topPadding = totalPaddingHeight / 2;
+    // const int leftPadding = totalPaddingWidth / 2;
     //const int bottomPadding = totalPaddingHeight - topPadding;
     //const int rightPadding = totalPaddingWidth - leftPadding;
     //printf("%d %d %d %d", topPadding, leftPadding, bottomPadding, rightPadding);
@@ -133,30 +138,34 @@ __device__ void device_CNN(float *inCh, float *outCh, float b, float *filter, in
 
     //TODO: reduce repeated computations by storing
     //Maybe make loop condition handle outside matrix area instead of continue
+    int topCheck = y - topPadding;
+    int leftCheck = x - leftPadding;
     int cnnOffset = offset_GM - topPadding*INPUT_WIDTH - leftPadding;
     float conv = 0;
-    for (int i = 0; i < filterSize; ++i) {
-        if (y - topPadding + i < 0) continue;
-        if (y - topPadding + i >= INPUT_HEIGHT) {
+    for (int i = 0, offset=cnnOffset, filterOffset=0; i < filterSize; ++i, offset += INPUT_WIDTH, filterOffset += filterSize) {
+        int topChecki = topCheck + i;
+        if (topChecki < 0) continue;
+        if (topChecki >= INPUT_HEIGHT) {
             //printf("%d %d %d\n", y, topPadding, i);
             break;
         }
         for (int j = 0; j < filterSize; ++j) {
-            int offset = cnnOffset + i * INPUT_WIDTH + j;
-            if (x - leftPadding + j < 0) continue;
-            if (x - leftPadding + j >= INPUT_WIDTH) break;
-            conv += inCh[cnnOffset + i * INPUT_WIDTH + j] * filter[i * filterSize + j];
+            int leftCheckj = leftCheck + j;
+            if (leftCheckj < 0) continue;
+            if (leftCheckj >= INPUT_WIDTH) break;
+            conv += inCh[offset + j] * filter[filterOffset + j];
             //printf("%d %d\n", i, j);
         }
     }
-
+    //printf("%f ", conv);
     outCh[offset_GM] = conv + b;
 }
 
 
 #ifdef SHMEM
 // Need to used shared memory to store filters as doesn't fit into constant memory
-__device__ void device_CNN_SHMEM_NotOpt(float *inCh, float *filter, int filterSize) {   
+__device__ void device_CNN_SHMEM(float *inCh, float *filter, int filterSize, 
+    int totalPaddingHeight, int totalPaddingWidth, int int topPadding, int bottomPadding, int leftPadding, int rightPadding) {   
     /* Shared Memory Layout:
     000...000 
     000...000
@@ -166,7 +175,6 @@ __device__ void device_CNN_SHMEM_NotOpt(float *inCh, float *filter, int filterSi
     000111000
     000...000
     000...000
-    
     */
     extern __shared__ float sData[];
     
@@ -177,23 +185,51 @@ __device__ void device_CNN_SHMEM_NotOpt(float *inCh, float *filter, int filterSi
     if (x >= INPUT_WIDTH || y >= INPUT_HEIGHT) {
         return;
     }
+    //const int threadId = threadIdx.x + threadIdx.y * blockDim.x;
 
-    const int totalPaddingHeight = filterSize - 1;
-    const int totalPaddingWidth = filterSize - 1;
-    const int topPadding = totalPaddingHeight / 2;
-    const int leftPadding = totalPaddingWidth / 2;
-    const int bottomPadding = totalPaddingHeight - topPadding;
-    const int rightPadding = totalPaddingWidth - leftPadding;
-
-    int totalPadding = totalPaddingHeight * blockDim.x + totalPaddingWidth * blockDim.y + // sides
-                    totalPaddingHeight*totalPaddingWidth; // Corners
+    //int totalPadding = totalPaddingHeight * blockDim.x + totalPaddingWidth * blockDim.y + // sides
+    //                totalPaddingHeight*totalPaddingWidth; // Corners
     float *sInCh = sData;
-    float *sfilter = sData + blockDim.x * blockDim.y + totalPadding;
+    //float *sfilter = sData + blockDim.x * blockDim.y + totalPadding;
 
     const int offset_GM = y * INPUT_WIDTH + x;
 
+    // SHMEM offsets (includes padding)
+    int shmemWidth = totalPaddingWidth + blockDim.x;
+    int shmemRow = threadIdx.y * shmemWidth; 
+    int shmemRow_plus_x = shmemRow + threadIdx.x;
+    int shmemRow_pos_padded = shmemRow_plus_x + leftPadding;
+
     // Every Thread in block copies it's value
-    sData[] = in[offset_GM];
+    sInCh[shmemRow_pos_padded] = in[offset_GM];
+    // Set top padding
+    if (threadIdx.y < topPadding) {
+        sInCh[shmemRow_pos_padded - topPadding * shmemWidth] = (y < topPadding) ? 0 : in[offset_GM - topPadding*blockDim.x];
+    }
+    // Set bottom padding
+    else if (threadIdx.y >= blockDim.y - bottomPadding) {
+        sInCh[shmemRow_pos_padded + bottomPadding * shmemWidth] = (y >= INPUT_HEIGHT - bottomPadding) ? 0 : in[offset_GM + bottomPadding*blockDim.x];
+    }
+    // Set Left padding of INPUT_HEIGHT - topPadding - bottomPadding
+    else if (threadIdx.y >= topPadding && threadIdx.y < blockDim.y - bottomPadding) { //TODO: could make else
+        if (threadIdx.x < leftPadding) {
+            sInCh[shmemRow_plus_x] = (x < leftPadding) ? 0 : in[offset_GM - leftPadding];
+        }
+        else if (threadIdx.x >= blockDim.x - rightPadding) {
+            sInCh[shmemRow_pos_padded + rightPadding] = (x >= INPUT_WIDTH - rightPadding) ? 0 : in[offset_GM + rightPadding];
+        }
+        // Set left overs on corners and a bit on Left and right sides
+        else if (leftPadding <= threadIdx.x && threadIdx.x < 2*leftPadding && 
+            threadIdx.y < 3*topPadding) {
+            sInCh[shmemRow_plus_x - 2*topPadding * shmemWidth] = in[offset_GM - 2*leftPadding - 2*topPadding*blockDim.x];
+        }
+        else if (INPUT_WIDTH - 2*rightPadding <= threadIdx.x && threadIdx.x < INPUT_WIDTH - rightPadding &&
+            threadIdx.y < 3*topPadding) {
+            sInCh[shmemRow_plus_x - 2*topPadding * shmemWidth] = in[offset_GM + 2*rightPadding - 2*topPadding*blockDim.x];            
+        }    
+    }
+
+
 
 
     //TODO: reduce repeated computations by storing
@@ -220,8 +256,9 @@ __device__ void device_CNN_SHMEM_NotOpt(float *inCh, float *filter, int filterSi
 }
 #endif
 
-__global__ void kernel(float *inCh, float *outCh, float b, float *filter, int filterSize) {
-    device_CNN(inCh, outCh, b, filter, filterSize);
+__global__ void kernel(float *inCh, float *outCh, float b, float *filter, int filterSize,
+    int totalPaddingHeight, int totalPaddingWidth, int topPadding, int leftPadding) {
+    device_CNN(inCh, outCh, b, filter, filterSize, totalPaddingHeight, totalPaddingWidth, topPadding, leftPadding);
 }
 
 
@@ -256,12 +293,16 @@ int getPadding(int filter) {
 float* allocHostBlock(std::vector<float*> &h_freeBlocks, std::mutex &h_freeBlocksMutex, int bytes) {
     float *mem = NULL;
 
+#ifdef EnableLock
     h_freeBlocksMutex.lock();
+#endif
     if (!h_freeBlocks.empty()) {
         mem = h_freeBlocks.back();
         h_freeBlocks.pop_back();
     }
+#ifdef EnableLock
     h_freeBlocksMutex.unlock();
+#endif
     if (mem == NULL) {
         mem = (float *)malloc(bytes);
     }
@@ -272,12 +313,16 @@ float* allocHostBlock(std::vector<float*> &h_freeBlocks, std::mutex &h_freeBlock
 float* allocDeviceBlock(std::vector<float*> &d_freeBlocks, std::mutex &d_freeBlocksMutex, int bytes) {
     float *mem = NULL;
 
+#ifdef EnableLock
     d_freeBlocksMutex.lock();
+#endif
     if (!d_freeBlocks.empty()) {
         mem = d_freeBlocks.back();
         d_freeBlocks.pop_back();
     }
+#ifdef EnableLock
     d_freeBlocksMutex.unlock();
+#endif
     if (mem == NULL) {
         gpuErrchk(cudaMalloc((void **)&mem, bytes));
     }
@@ -304,76 +349,146 @@ void setupFilterCh(int ch, float *host_cov_b, float *host_cov_filter, cudaStream
         ch * size, cudaMemcpyHostToDevice, stream) );
 }
 
-void layer1_cov1(int bytes, dim3 grid, dim3 block,
+struct Params {
+    std::vector<float*> *d_freeBlocks; std::mutex *d_freeBlocksMutex;
+    std::vector<int> *freeStreams; std::mutex *freeStreamsMutex;
+    int streamIdx;
+    float *inBlock; int *count;
+#ifdef PRINTDATA
+    float *hOutBlock;
+    int outCh;
+#endif
+};
+
+void callbackProcessFinished(cudaStream_t stream, cudaError_t status, void *arg) {
+    Params *params = (Params*)arg;
+    //printf("call: %d %d\n", *params->count, params->streamIdx);
+    // Reuse stream
+#ifdef EnableLock
+    params->freeStreamsMutex->lock();
+#endif
+    params->freeStreams->push_back(params->streamIdx);
+#ifdef EnableLock
+    params->freeStreamsMutex->unlock();
+#endif
+    //printf("callend: %d\n", *params->count);
+
+    // Reuse memory 
+#ifdef EnableLock
+    params->d_freeBlocksMutex->lock();
+#endif
+    ++(*params->count);
+    if (*params->count == COV1_FILTER_OUT_CH) {
+        params->d_freeBlocks->push_back(params->inBlock);
+    }
+#ifdef EnableLock
+    params->d_freeBlocksMutex->unlock();
+#endif
+
+#ifdef PRINTDATA
+    printf("Output ch%d:\n", params->outCh);
+    Print2D(params->hOutBlock, INPUT_WIDTH, INPUT_HEIGHT);
+    //free(&params->hOutBlock[params->outCh]);
+#endif
+}
+
+
+void layer1_cov1(int bytes, dim3 grid, dim3 block, cudaStream_t *streams,
     float *h_input, float *d_input, float **d_output,
-    std::vector<float*> &d_freeBlocks, std::mutex &d_freeBlocksMutex,
-    std::vector<cudaStream_t> &freeStreams, std::mutex &freeStreamsMutex) {
+#ifdef PRINTDATA
+    float **h_output,
+#endif
+    std::vector<float*> *d_freeBlocks, std::mutex *d_freeBlocksMutex,
+    std::vector<int> *freeStreams, std::mutex *freeStreamsMutex) {
     
-    cudaStream_t streams[COV1_FILTER_OUT_CH];
+    const int totalPaddingHeight = COV1_FILTER_N - 1;
+    const int totalPaddingWidth = COV1_FILTER_N - 1;
+    const int topPadding = totalPaddingHeight / 2;
+    const int leftPadding = totalPaddingWidth / 2;
+    const int bottomPadding = totalPaddingHeight - topPadding;
+    const int rightPadding = totalPaddingWidth - leftPadding;
+
     cudaEvent_t event;
     gpuErrchk(cudaEventCreate(&event));
+
+    Params params[COV1_FILTER_OUT_CH];
+    int count = 0;
+    for (int i = 0; i < COV1_FILTER_OUT_CH; ++i) {
+        params[i].freeStreams = freeStreams; params[i].freeStreamsMutex = freeStreamsMutex;
+        params[i].d_freeBlocks = d_freeBlocks; params[i].d_freeBlocksMutex = d_freeBlocksMutex;
+        params[i].count = &count;
+        params[i].inBlock = d_input;
+    }
 
     float *filterAddr;
     gpuErrchk(cudaGetSymbolAddress((void**)&filterAddr, device_cov1_filter));
 
     bool got = false;
+    int streamIdx = 0;
     for (int i=0; i < COV1_FILTER_OUT_CH; ++i) {
         // Get Stream
-        got = false;
-        freeStreamsMutex.lock();
-        if (!freeStreams.empty()) {
-            got = true;
-            streams[i] = freeStreams.back();
-            freeStreams.pop_back();
+        streamIdx = -1;
+        while (streamIdx == -1) {
+#ifdef EnableLock
+            freeStreamsMutex->lock();
+#endif
+            if (!freeStreams->empty()) {
+                streamIdx = freeStreams->back();
+                freeStreams->pop_back();
+            }
+#ifdef EnableLock
+            freeStreamsMutex->unlock();
+#endif
         }
-        freeStreamsMutex.unlock();
-        if (!got) { 
-            gpuErrchk(cudaStreamCreate(&streams[i]));
-        }
-    
         // Copy over input
         if (i == 0) {
             // Performing async for implementation of multiple CNNs running in parallel for server
     
             // Copy over input
-            gpuErrchk(cudaMemcpyAsync(d_input, h_input, bytes, cudaMemcpyHostToDevice, streams[i]));
-            gpuErrchk(cudaEventRecord(event, streams[i]));
+            gpuErrchk(cudaMemcpyAsync(d_input, h_input, bytes, cudaMemcpyHostToDevice, streams[streamIdx]));
+            gpuErrchk(cudaEventRecord(event, streams[streamIdx]));
         }
         // Every stream needs to wait for input
         if (i > 0) // input cpy and first filter run on same stream so skip on first stream 
-            gpuErrchk(cudaStreamWaitEvent(streams[i], event));
+            gpuErrchk(cudaStreamWaitEvent(streams[streamIdx], event));
 
         // Setup all filters and b
-        setupFilterCh(i, &host_cov1_b[i], &host_cov1_filter[0][i][0][0], streams[i]);
+        setupFilterCh(i, &host_cov1_b[i], &host_cov1_filter[0][i][0][0], streams[streamIdx]);
 
         // Get output memory
         got = false;
-        d_freeBlocksMutex.lock();
-        if (!d_freeBlocks.empty()) {
+#ifdef EnableLock
+        d_freeBlocksMutex->lock();
+#endif
+        if (!d_freeBlocks->empty()) {
             got = true;
-            d_output[i] = d_freeBlocks.back();
-            d_freeBlocks.pop_back();
+            d_output[i] = d_freeBlocks->back();
+            d_freeBlocks->pop_back();
         }
-        d_freeBlocksMutex.unlock();
+#ifdef EnableLock
+        d_freeBlocksMutex->unlock();
+#endif
         if (!got) {
             gpuErrchk(cudaMalloc((void **)&d_output[i], bytes));
         }
 
-        kernel<<<grid, block, 0, streams[i]>>>(d_input, d_output[i], host_cov1_b[i], filterAddr + i*COV1_FILTER_N*COV1_FILTER_N, COV1_FILTER_N);
-        
+        kernel<<<grid, block, 0, streams[streamIdx]>>>(d_input, d_output[i], host_cov1_b[i], filterAddr + i*COV1_FILTER_N*COV1_FILTER_N, COV1_FILTER_N, 
+                totalPaddingHeight, totalPaddingWidth, topPadding, leftPadding);
+
+#ifdef PRINTDATA
         // If want output then need to copy back to host memory
-        //gpuErrchk(cudaMemcpyAsync(&out[i], &d_output[i], bytes, cudaMemcpyDeviceToHost, streams[i]));
-    }
+        gpuErrchk(cudaMemcpyAsync(h_output[i], d_output[i], bytes, cudaMemcpyDeviceToHost, streams[streamIdx]));
+        params[i].hOutBlock = h_output[i];
+        params[i].outCh = i;
+#endif
 
-    // Wait for output on stream
-    for (int i=0; i < COV1_FILTER_OUT_CH; ++i) {
-        gpuErrchk(cudaStreamSynchronize(streams[i]));
-        // gpuErrchk(cudaStreamDestroy(streams[i]));
-
-        freeStreamsMutex.lock();
-        freeStreams.push_back(streams[i]);
-        freeStreamsMutex.unlock();
+        params[i].streamIdx = streamIdx;
+        cudaStreamAddCallback(streams[streamIdx], callbackProcessFinished, (void*)&params[i], 0);
+        //printf("i:%d\n", i);
     }
+    // TODO: fix not needing this
+    // need as when function ends stack cleared, so params dropped but then accessed by callback still
+    gpuErrchk(cudaDeviceSynchronize());
 
     gpuErrchk(cudaEventDestroy(event));
 
@@ -393,12 +508,14 @@ int main( int argc, char *argv[])
     std::vector<float*> h_freeBlocks;
     std::mutex h_freeBlocksMutex;
 
-    std::vector<cudaStream_t> freeStreams;
+    std::vector<int> freeStreams;
     std::mutex freeStreamsMutex;
 
     int blockSize = INPUT_HEIGHT*INPUT_WIDTH;
     int bytes = blockSize * sizeof(float);
     
+    cudaStream_t streams[NUM_STREAM]; //[COV1_FILTER_OUT_CH];
+
     // Setup filter values
     std::fill(&host_cov1_b[0], &host_cov1_b[0] + COV1_FILTER_OUT_CH, 1.0);
     std::fill(&host_cov1_filter[0][0][0][0], &host_cov1_filter[0][0][0][0] + COV1_FILTER_IN_CH * COV1_FILTER_OUT_CH * COV1_FILTER_N * COV1_FILTER_N, 1.0);
@@ -445,6 +562,11 @@ int main( int argc, char *argv[])
     dim3 grid( (INPUT_WIDTH + block.x-1) / block.x, 
                (INPUT_HEIGHT + block.y-1) / block.y);
 
+    for (int i = NUM_STREAM - 1; i >= 0; --i) {
+        gpuErrchk(cudaStreamCreate(&streams[i]));
+        freeStreams.push_back(i);
+    }
+
 //================= Timing Begins ========================
     double start_time=getTimeStamp();
 
@@ -460,42 +582,22 @@ int main( int argc, char *argv[])
 
     // Perform First convolution layer
     float *d_cov1_out[COV1_FILTER_OUT_CH];
-    layer1_cov1(bytes, grid, block, h_input, d_input, d_cov1_out,  
-        d_freeBlocks, d_freeBlocksMutex,
-        freeStreams, freeStreamsMutex);
 
-    // Input Not needed anymore by device
-    gpuErrchk(cudaHostUnregister(h_input));
-    free(h_input);
-
+    layer1_cov1(bytes, grid, block, streams,
+        h_input, d_input, d_cov1_out,
 #ifdef PRINTDATA
-    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
-        gpuErrchk(cudaMemcpyAsync(h_output[ch], d_cov1_out[ch], bytes, cudaMemcpyDeviceToHost, 
-            freeStreams[ch]));
-    }
-    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
-        // Need to wait for stream to complete copy
-        gpuErrchk(cudaStreamSynchronize(freeStreams[ch]));
-        gpuErrchk(cudaHostUnregister(h_output[ch]));
-        
-        printf("Output ch%d:\n", ch);
-        Print2D(h_output[ch], INPUT_WIDTH, INPUT_HEIGHT);
-
-        free(h_output[ch]);
-    }
-
+        h_output,
 #endif
+        &d_freeBlocks, &d_freeBlocksMutex,
+        &freeStreams, &freeStreamsMutex);
 
-    d_freeBlocksMutex.lock();
-    // Add device input to list of free blocks
-    d_freeBlocks.push_back(d_input);
-    d_input = NULL;
-    
-    // Add device output to list of free blocks
-    for (int i=0; i < COV1_FILTER_OUT_CH; ++i) {
-        d_freeBlocks.push_back(d_cov1_out[i]);
-    }
-    d_freeBlocksMutex.unlock();
+    // Need to wait for stream to complete copy
+    // gpuErrchk(cudaHostUnregister(h_output[ch]));
+    //for (int i = 0; i < NUM_STREAM; ++i) {
+        //printf("Sync %d ", i);
+        //gpuErrchk(cudaStreamSynchronize(streams[i]));
+    //}
+    //gpuErrchk(cudaDeviceSynchronize());
 
     double end_time=getTimeStamp();
 //================= Timing Ends ========================    
@@ -505,11 +607,21 @@ int main( int argc, char *argv[])
     printf("Total Time: %d\n", total_time_ms);
     //printf("Filter Cpy Time: %d\n", constMemFilter_time_ms);
 
-    // Clean up streams -> Error: invalid device context simple.cu 520
+    // Input Not needed anymore by device
+    gpuErrchk(cudaHostUnregister(h_input));
+    //free(h_input);
+
+    // Add device output to list of free blocks
+    for (int i=0; i < COV1_FILTER_OUT_CH; ++i) {
+        d_freeBlocks.push_back(d_cov1_out[i]);
+    }
+
+    // Clean up streams
     while (!freeStreams.empty()) {
-        cudaStream_t stream = freeStreams.back();
+        int streamIdx = freeStreams.back();
         freeStreams.pop_back();
-        gpuErrchk(cudaStreamDestroy(stream));
+        //printf("%d ", streamIdx);
+        gpuErrchk(cudaStreamDestroy(streams[streamIdx]));
     }
 
     // Clean up device blocks
