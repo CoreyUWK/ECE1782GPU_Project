@@ -39,10 +39,12 @@ However, threads will not be indexed top left of convolution with filter
 #include <mutex>
 #include <algorithm>
 #include "cnn_weights.cu"
-//#define PRINTDATA 1
+#define PRINTDATA 1
 #define EnableLock 1
+
 #define SHMEM 1
-#define DebugSHMEM 1
+//#define DebugSHMEM 1
+//#define DebugSHMEM_Data 1
 
 #define INPUT_WIDTH 100//2048//100
 #define INPUT_HEIGHT 56//2048//56
@@ -199,44 +201,79 @@ __device__ void device_CNN_SHMEM(float *inCh, float *outCh, float b, float *filt
         if (x >= 2*leftPadding && y >= 2*topPadding && // Basically not block 0 (but if checking blockIdx would have to split this into two)
             threadIdx.y < 3*topPadding && threadIdx.x < 2*leftPadding &&
             leftPadding <= threadIdx.x) {
-            sInCh[shmemRow_plus_x - leftPadding - 2*topPadding*shmemWidth] = 6;//in[offset_GM - 2*leftPadding - 2*topPadding*INPUT_WIDTH];
+            sInCh[shmemRow_plus_x - leftPadding - 2*topPadding*shmemWidth] = 
+#ifdef DebugSHMEM_Data
+            6;
+#else
+            inCh[offset_GM - 2*leftPadding - 2*topPadding*INPUT_WIDTH];
+#endif
         }
         // Set left-overs on bottom left corner
         else if (x >= 2*leftPadding && (y >= (INPUT_HEIGHT - 3*bottomPadding) || threadIdx.y >= (blockDim.y - 3*bottomPadding)) && y < (INPUT_HEIGHT - 2*bottomPadding) &&
             leftPadding <= threadIdx.x && threadIdx.x < 2*leftPadding) {
-            sInCh[shmemRow_plus_x - leftPadding + 2*rightPadding*shmemWidth] = 8;            
+            sInCh[shmemRow_plus_x - leftPadding + 2*rightPadding*shmemWidth] = 
+#ifdef DebugSHMEM_Data
+            8;
+#else
+            inCh[offset_GM - 2*leftPadding  + 2*bottomPadding*blockDim.x];
+#endif            
         }
     }
 
     if (x >= INPUT_WIDTH || y >= INPUT_HEIGHT) {
         return;
     }
+
     //const int threadId = threadIdx.x + threadIdx.y * blockDim.x;
     //int totalPadding = totalPaddingHeight * blockDim.x + totalPaddingWidth * blockDim.y + // sides
     //                totalPaddingHeight*totalPaddingWidth; // Corners
     //float *sfilter = sData + blockDim.x * blockDim.y + totalPadding;
 
     // Every Thread in block copies it's value
-    sInCh[shmemRow_pos_padded] = 1;//inCh[offset_GM];
-    
+    sInCh[shmemRow_pos_padded] = 
+#ifdef DebugSHMEM_Data
+    1;
+#else
+    inCh[offset_GM];
+#endif
     // Set top padding using all threads in topPadding number of rows
     if (blockIdx.y != 0 && threadIdx.y < topPadding) { // y >= topPadding
-        sInCh[shmemRow_pos_padded - topPadding * shmemWidth] = 2; //inCh[offset_GM - topPadding*INPUT_WIDTH];
+        sInCh[shmemRow_pos_padded - topPadding * shmemWidth] = 
+#ifdef DebugSHMEM_Data
+        2;
+#else
+        inCh[offset_GM - topPadding*INPUT_WIDTH];
+#endif
     }
     // Set bottom padding using all threads in bottomPadding number of rows
     else if (y < (INPUT_HEIGHT - bottomPadding) && threadIdx.y >= (blockDim.y - bottomPadding)) { //blockIdx.y != lastY => could pass # blocks to kernel or use static #define size -> maybe helps performance try
-        sInCh[shmemRow_pos_padded + bottomPadding * shmemWidth] = 3;//inCh[offset_GM + bottomPadding*INPUT_WIDTH];
+        sInCh[shmemRow_pos_padded + bottomPadding * shmemWidth] = 
+#ifdef DebugSHMEM_Data
+        3;
+#else
+        inCh[offset_GM + bottomPadding*INPUT_WIDTH];
+#endif
     }
     // Use remaining threads for left-over area (left, right, corners + top/bottom padding extra on sides)
     // left-over threads = INPUT_HEIGHT - topPadding - bottomPadding 
     else if (threadIdx.y >= topPadding && threadIdx.y < (blockDim.y - bottomPadding)) { // this could be an else
         // Set Left padding 
         if (y < (INPUT_HEIGHT - bottomPadding) && x >= leftPadding && threadIdx.x < leftPadding) {
-            sInCh[shmemRow_plus_x] = 4;//inCh[offset_GM - leftPadding];
+            sInCh[shmemRow_plus_x] = 
+#ifdef DebugSHMEM_Data
+            4;
+#else
+            inCh[offset_GM - leftPadding];
+#endif
         }
         // Set Right padding
         else if (y < (INPUT_HEIGHT - bottomPadding) && x < (INPUT_WIDTH - rightPadding) && threadIdx.x >= blockDim.x - rightPadding) {
-            sInCh[shmemRow_pos_padded + rightPadding] = 5;//inCh[offset_GM + rightPadding];
+            sInCh[shmemRow_pos_padded + rightPadding] = 
+#ifdef DebugSHMEM_Data
+            5;
+#else
+            inCh[offset_GM + rightPadding];
+#endif
         }
         // Set left-overs on top left corner
         /*else if (x >= 2*leftPadding && y >= 2*topPadding && // Basically not block 0 (but if checking blockIdx would have to split this into two)
@@ -248,9 +285,29 @@ __device__ void device_CNN_SHMEM(float *inCh, float *outCh, float b, float *filt
         else if (x <= (INPUT_WIDTH - 2*rightPadding) && y >= 2*topPadding &&
             threadIdx.y < 3*topPadding && 
             (blockDim.x - rightPadding) >= threadIdx.x && threadIdx.x >= (blockDim.x - 2*rightPadding) ) {
-            sInCh[shmemRow_pos_padded + 2*rightPadding - 2*topPadding*shmemWidth] = 7; //inCh[offset_GM + 2*rightPadding - 2*topPadding*blockDim.x];            
+            sInCh[shmemRow_pos_padded + 2*rightPadding - 2*topPadding*shmemWidth] = 
+#ifdef DebugSHMEM_Data
+            7; 
+#else
+            inCh[offset_GM + 2*rightPadding - 2*topPadding*blockDim.x];
+#endif
         }
-    
+        // Set left-overs on bottom left corner
+        /*else if (x >= 2*leftPadding && (y >= (INPUT_HEIGHT - 3*bottomPadding) || threadIdx.y >= (blockDim.y - 3*bottomPadding)) && y < (INPUT_HEIGHT - 2*bottomPadding) &&
+            leftPadding <= threadIdx.x && threadIdx.x < 2*leftPadding) {
+            sInCh[shmemRow_plus_x - leftPadding + 2*rightPadding*shmemWidth] = 8;            
+        }*/
+        // Set left-overs on bottom right corner
+        else if (x <= (INPUT_WIDTH - 2*rightPadding) && 
+            (y >= (INPUT_HEIGHT - 3*bottomPadding) || threadIdx.y >= (blockDim.y - 3*bottomPadding)) && y < (INPUT_HEIGHT - 2*bottomPadding) &&
+            (blockDim.x - rightPadding) >= threadIdx.x && threadIdx.x >= (blockDim.x - 2*rightPadding)) {
+            sInCh[shmemRow_pos_padded + 2*rightPadding + 2*bottomPadding*shmemWidth] = 
+#ifdef DebugSHMEM_Data
+            9;
+#else
+            inCh[offset_GM + 2*rightPadding + 2*bottomPadding*blockDim.x];
+#endif            
+        }
     }
 
     __syncthreads(); //TODO: try only syncing threads used in filter area (or see if helps with performance)
