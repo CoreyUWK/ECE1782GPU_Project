@@ -39,15 +39,16 @@ However, threads will not be indexed top left of convolution with filter
 #include <mutex>
 #include <algorithm>
 #include "cnn_weights.cu"
-#define PRINTDATA 1
+
+//#define PRINTDATA 1
 #define EnableLock 1
 
 #define SHMEM 1
 //#define DebugSHMEM 1
 //#define DebugSHMEM_Data 1
 
-#define INPUT_WIDTH 100//2048//100
-#define INPUT_HEIGHT 56//2048//56
+#define INPUT_WIDTH 2048//100
+#define INPUT_HEIGHT 2048//56
 
 #define NUM_STREAM 16
 
@@ -196,6 +197,48 @@ __device__ void device_CNN_SHMEM(float *inCh, float *outCh, float b, float *filt
     int shmemRow_plus_x = shmemRow + threadIdx.x;
     int shmemRow_pos_padded = shmemRow_plus_x + leftPadding;
 
+    // Initialize shared memory to zero - when block is on edge of grid
+    // TODO: try to make more efficent by including in below code if checks
+    // As here threads are doing duplicate work
+    sInCh[shmemRow_pos_padded - topPadding*shmemWidth - leftPadding] = 
+#ifdef DebugSHMEM_Data
+    -1;
+#else
+    0;
+#endif
+    sInCh[shmemRow_pos_padded - topPadding*shmemWidth] = 
+#ifdef DebugSHMEM_Data
+    -1;
+#else
+    0;
+#endif
+    sInCh[shmemRow_pos_padded - topPadding*shmemWidth + rightPadding] =
+#ifdef DebugSHMEM_Data
+    -1;
+#else
+    0;
+#endif
+    sInCh[shmemRow_pos_padded + bottomPadding*shmemWidth - leftPadding] =
+#ifdef DebugSHMEM_Data
+    -1;
+#else
+    0;
+#endif
+    sInCh[shmemRow_pos_padded + bottomPadding*shmemWidth] = 
+#ifdef DebugSHMEM_Data
+    -1;
+#else
+    0;
+#endif
+    sInCh[shmemRow_pos_padded + bottomPadding*shmemWidth + rightPadding] =
+#ifdef DebugSHMEM_Data
+    -1;
+#else
+    0;
+#endif
+    __syncthreads();
+
+    // Now setup Shared memory with data
     if (threadIdx.y >= topPadding && threadIdx.y < (blockDim.y - bottomPadding)) { // this could be an else
         // Set left-overs on top left corner
         if (x >= 2*leftPadding && y >= 2*topPadding && // Basically not block 0 (but if checking blockIdx would have to split this into two)
@@ -314,13 +357,13 @@ __device__ void device_CNN_SHMEM(float *inCh, float *outCh, float b, float *filt
 
 #ifdef DebugSHMEM
     //printf("%d,%d->%d\n", x,y, shmemRow_pos_padded);
-    if (blockIdx.x == 1 && blockIdx.y == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
+    if (blockIdx.x == 3 && blockIdx.y == 1 && threadIdx.x == 0 && threadIdx.y == 0) {
         printf("Top: %d, Left:%d Right:%d Bottom:%d\n", topPadding, leftPadding, rightPadding, bottomPadding);
         printf("SHMEM:\n");
         for (int i=0, row=0; i < totalPaddingHeight + blockDim.y; ++i, row += shmemWidth) {
             for (int j=0; j < shmemWidth; ++j) {
                 //printf("%d,%d=%f ", i,j, sInCh[row + j]);
-                printf("%.0f ", sInCh[row + j]);
+                printf("%.0f\t", sInCh[row + j]);
             }
             printf("\n");
         }
