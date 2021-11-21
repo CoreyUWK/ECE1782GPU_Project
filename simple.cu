@@ -29,7 +29,6 @@ However, threads will not be indexed top left of convolution with filter
 
 3) for multi input channel, perform all filter convolution in input per thread, then write out to ouput (inline or not)
 
-
 */
 #include <stdio.h>
 #include <sys/time.h>
@@ -47,8 +46,8 @@ However, threads will not be indexed top left of convolution with filter
 //#define DebugSHMEM 1
 //#define DebugSHMEM_Data 1
 
-#define INPUT_WIDTH 2048//100
-#define INPUT_HEIGHT 2048//56
+#define INPUT_WIDTH 100//2048//100
+#define INPUT_HEIGHT 56//2048//56
 
 #define NUM_STREAM 16
 
@@ -623,7 +622,7 @@ void layer1_cov1(int bytes, dim3 grid, dim3 block, cudaStream_t *streams,
 #endif
 
         params[i].streamIdx = streamIdx;
-        cudaStreamAddCallback(streams[streamIdx], callbackProcessFinished, (void*)&params[i], 0);
+        gpuErrchk(cudaStreamAddCallback(streams[streamIdx], callbackProcessFinished, (void*)&params[i], 0));
         //printf("i:%d\n", i);
     }
     // TODO: fix not needing this
