@@ -38,6 +38,7 @@ However, threads will not be indexed top left of convolution with filter
 #include <mutex>
 #include <algorithm>
 #include "cnn_weights.cu"
+#include <cmath>
 
 //#define PRINTDATA 1
 #define SHMEM 1
@@ -46,6 +47,12 @@ However, threads will not be indexed top left of convolution with filter
 
 #define INPUT_WIDTH 100//2048//100
 #define INPUT_HEIGHT 56//2048//56
+
+// MAXPOOL Config
+#define PAD_VALUE -INFINITY
+#define MAX_TOL 1e-3
+#define POOL_SIZE 2
+#define STRIDE POOL_SIZE
 
 /*You can use the following for any CUDA function that returns cudaError_t type*/
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
@@ -62,6 +69,60 @@ double getTimeStamp() {
         struct timeval tv;
         gettimeofday( &tv, NULL );
         return (double) tv.tv_usec/1000000 + tv.tv_sec;
+}
+
+__device__ float relu(float val) {
+    return fmaxf(0.0, val);
+}
+
+__global__ void max_pool_2d(
+        float *X,
+        float *Y,
+        int in_rows,
+        int in_cols,
+        int kx,
+        int ky,
+        int s
+    ) {
+    unsigned int o_col = blockDim.x * blockIdx.x + threadIdx.x;
+    unsigned int o_row = blockDim.y * blockIdx.y + threadIdx.y;
+
+    float out_element = PAD_VALUE;
+    float current_element;
+    unsigned int addr;
+
+    int out_rows = (in_rows - 1) / s + 1;
+    int out_cols = (in_cols - 1) / s + 1;
+
+    if ((o_col >= out_cols) || (o_row >= out_rows)) {
+        return;
+    }
+
+    // Implement padding=same from tensorflow
+    int px_pre = (in_cols % s == 0) ? max(kx - s, 0) : max(kx - in_cols % s, 0);
+    int py_pre = (in_rows % s == 0) ? max(ky - s, 0) : max(ky - in_rows % s, 0);
+    px_pre /= 2;
+    py_pre /= 2;
+
+    int i_y_min = o_row * s - py_pre;
+    int i_x_min = o_col * s - px_pre;
+
+
+    for (int i_col = i_x_min; i_col < i_x_min + kx; i_col++) {
+        for (int i_row = i_y_min; i_row < i_y_min + ky; i_row++) {
+            addr = i_row * in_cols + i_col;
+
+            current_element = (
+                i_col >= 0 && i_col < in_cols && i_row >= 0 && i_row < in_rows
+            ) ? X[addr] : PAD_VALUE;
+
+            if (current_element > out_element)
+                out_element = current_element;
+        }
+    }
+
+    addr = o_row * out_cols + o_col;
+    Y[addr] = out_element;
 }
 
 __constant__ float *device_output[COV1_FILTER_OUT_CH];
@@ -312,7 +373,7 @@ __device__ void device_CNN_Multi_SHMEM(float *inCh, int filterSize,
 #endif
 
     int cnnOffset = shmemRow_plus_x - topPadding*shmemWidth;
-    float cacheIn[COV1_FILTER_N * COV1_FILTER_N];
+    float cacheIn[COV1_FILTER_N * COV1_FILTER_N]; //TODO: could use templates for filter size
     for (int i=0, row=0, shmemRowOffset=cnnOffset, filterRowOffset=0; i < filterSize; ++i, row += filterSize, shmemRowOffset += shmemWidth, filterRowOffset += filterSize) {
         for (int j = 0; j < filterSize; ++j) {
             cacheIn[row + j] = sInCh[shmemRowOffset + j];
@@ -320,12 +381,12 @@ __device__ void device_CNN_Multi_SHMEM(float *inCh, int filterSize,
     }
 
     int filterChOffset = 0;
-    for (int ch=0; ch < 64; ++ch, filterChOffset += COV1_FILTER_N*COV1_FILTER_N) {
+    for (int ch=0; ch < 64; ++ch, filterChOffset += filterSize*filterSize) {
         //TODO: reduce repeated computations by storing
         //Maybe make loop condition handle outside matrix area instead of continue
         float conv = 0.0;
         int filterOffset = filterChOffset;
-        for (int i = 0, row=0; i < filterSize; ++i, filterOffset += filterSize, row += COV1_FILTER_N) {
+        for (int i = 0, row=0; i < filterSize; ++i, filterOffset += filterSize, row += filterSize) {
             for (int j = 0; j < filterSize; ++j) {
                 conv += cacheIn[row + j] * device_cov1_filter[0][ch][i][j]; //[filterOffset + j];
             }
@@ -333,7 +394,7 @@ __device__ void device_CNN_Multi_SHMEM(float *inCh, int filterSize,
         /*if (x == 0 && y == 0) {
             printf("Addr%d: %p %p ", ch, device_output[ch], &device_output[ch]);
         }*/
-        device_output[ch][offset_GM] = conv + device_cov1_b[ch];
+        device_output[ch][offset_GM] = relu(conv + device_cov1_b[ch]);
     }
 }
 #endif
@@ -342,6 +403,7 @@ __device__ void device_CNN_Multi_SHMEM(float *inCh, int filterSize,
 __global__ void kernel_multi(float *inCh, int filterSize,
     int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
 #ifdef SHMEM
+    //printf("%d %d %d %d %d %d", totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
     device_CNN_Multi_SHMEM(inCh, filterSize,
         totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
 #else  
@@ -399,6 +461,18 @@ void setUpCNNFilters(float *host_cov_b, float * host_cov_filter) {
         0, cudaMemcpyHostToDevice));
 }
 
+void getConvPadding(int filterSize, int &totalPaddingHeight, 
+    int &totalPaddingWidth, int &topPadding, int &leftPadding,
+    int &bottomPadding, int &rightPadding) {
+
+    totalPaddingHeight = filterSize - 1;
+    totalPaddingWidth = filterSize - 1;
+    topPadding = totalPaddingHeight / 2;
+    leftPadding = totalPaddingWidth / 2;
+    bottomPadding = totalPaddingHeight - topPadding;
+    rightPadding = totalPaddingWidth - leftPadding;
+}
+
 void layer1_cov1_multi(int bytes, dim3 grid, dim3 block,
     float *h_input, float *d_input, float *d_output[COV1_FILTER_OUT_CH]) {
     
@@ -419,13 +493,11 @@ void layer1_cov1_multi(int bytes, dim3 grid, dim3 block,
             ch*sizeof(float*), cudaMemcpyHostToDevice) );
     }
 
-    const int totalPaddingHeight = COV1_FILTER_N - 1;
-    const int totalPaddingWidth = COV1_FILTER_N - 1;
-    const int topPadding = totalPaddingHeight / 2;
-    const int leftPadding = totalPaddingWidth / 2;
-    const int bottomPadding = totalPaddingHeight - topPadding;
-    const int rightPadding = totalPaddingWidth - leftPadding;
-
+    int totalPaddingHeight, totalPaddingWidth;
+    int topPadding, leftPadding, bottomPadding, rightPadding;
+    getConvPadding(COV1_FILTER_N, totalPaddingHeight, totalPaddingWidth,
+        topPadding, leftPadding, bottomPadding, rightPadding);
+    
 #ifdef SHMEM
     const int shmemSize = (INPUT_HEIGHT + totalPaddingHeight) * (INPUT_WIDTH + totalPaddingWidth) * sizeof(float);
     kernel_multi<<<grid, block, shmemSize>>>(d_input, COV1_FILTER_N, 
@@ -435,13 +507,31 @@ void layer1_cov1_multi(int bytes, dim3 grid, dim3 block,
                 totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
 #endif
     gpuErrchk(cudaDeviceSynchronize());
-
-
-    // If want output then need to copy back to host memory
-    //gpuErrchk(cudaMemcpyAsync(&out[i], &d_output[i], bytes, cudaMemcpyDeviceToHost, streams[i]));
-
 }
 
+void layer1_maxPool_multi(int in_cols, int in_rows, float **d_input, 
+    int &out_cols, int &out_rows, float **d_output) {
+    
+    out_cols = (in_cols - 1) / STRIDE + 1;
+    out_rows = (in_rows - 1) / STRIDE + 1;
+    //printf("Out Size: %d,%d\n", out_rows, out_cols);
+
+    int out_elements = out_rows * out_cols;
+    int out_bytes = out_elements * sizeof(float);
+
+    dim3 block(32, 32); // configure
+    dim3 grid(
+            (out_cols + block.x - 1) / block.x,
+            (out_rows + block.y - 1) / block.y);
+
+    // Get output memory
+    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
+        gpuErrchk(cudaMalloc((void **)&d_output[ch], out_bytes));
+        max_pool_2d<<<grid, block>>>(d_input[ch], d_output[ch], in_rows, in_cols, POOL_SIZE, POOL_SIZE, STRIDE);
+    }
+
+    gpuErrchk(cudaDeviceSynchronize());
+}
 
 int main( int argc, char *argv[])
 {   
@@ -495,38 +585,52 @@ int main( int argc, char *argv[])
     dim3 grid( (INPUT_WIDTH + block.x-1) / block.x, 
                (INPUT_HEIGHT + block.y-1) / block.y);
 
+    int out_col = INPUT_WIDTH, out_row = INPUT_HEIGHT;
+    float *d_in[COV1_FILTER_OUT_CH]; 
+    float *d_out[COV1_FILTER_OUT_CH];
 //================= Timing Begins ========================
     double start_time=getTimeStamp();
 
     // Perform First convolution layer
-    float *d_cov1_out[COV1_FILTER_OUT_CH];
-    layer1_cov1_multi(bytes, grid, block, h_input, d_input, d_cov1_out);
+    layer1_cov1_multi(bytes, grid, block, h_input, d_input, d_out);
 
     // Input Not needed anymore by device
     gpuErrchk(cudaHostUnregister(h_input));
     free(h_input);
+    gpuErrchk(cudaFree(d_input));
 
-#ifdef PRINTDATA
+    std::copy(d_out, d_out + COV1_FILTER_OUT_CH, d_in);
+    layer1_maxPool_multi(INPUT_WIDTH, INPUT_HEIGHT, d_in, 
+        out_col, out_row, d_out);
+
     for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
-        gpuErrchk(cudaMemcpy(h_output[ch], d_cov1_out[ch], bytes, cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaFree(d_in[ch]));
     }
-    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
-        // Need to wait for stream to complete copy
-        gpuErrchk(cudaHostUnregister(h_output[ch]));
-        
-        printf("Output ch%d:\n", ch);
-        Print2D(h_output[ch], INPUT_WIDTH, INPUT_HEIGHT);
-
-        free(h_output[ch]);
-    }
-
-#endif
 
     double end_time=getTimeStamp();
 //================= Timing Ends ========================    
     int total_time_ms = (int)ceil((end_time-start_time)*1000);
     //int constMemFilter_time_ms = (int)ceil((constMemFilter_time - start_time)*1000);
     
+#ifdef PRINTDATA
+    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
+        gpuErrchk(cudaMemcpy(h_output[ch], d_out[ch], out_col*out_row*sizeof(float), cudaMemcpyDeviceToHost));
+    }
+    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
+        // Need to wait for stream to complete copy
+        gpuErrchk(cudaHostUnregister(h_output[ch]));
+        
+        printf("Output ch%d:\n", ch);
+        Print2D(h_output[ch], out_col, out_row);
+
+        free(h_output[ch]);
+    }
+#endif
+    
+    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
+        gpuErrchk(cudaFree(d_out[ch]));
+    }
+
     printf("Total Time: %d\n", total_time_ms);
     //printf("Filter Cpy Time: %d\n", constMemFilter_time_ms);
 
