@@ -184,8 +184,8 @@ __device__ void device_CNN_Multi(int in_cols, int in_rows, float *inCh, int filt
 }
 
 #ifdef SHMEM
-__device__ void device_CNN_Multi_SHMEM(float *inCh, int filterSize,
-        int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
+__device__ void device_CNN_Multi_SHMEM(int in_cols, int in_rows, float *inCh, int filterSize, bool isSingle, bool isFirst, bool isLast,
+    int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
     /* Shared Memory Layout:
     000...000 
     000...000
@@ -203,14 +203,14 @@ __device__ void device_CNN_Multi_SHMEM(float *inCh, int filterSize,
     const int x = threadIdx.x + blockIdx.x * blockDim.x;
     const int y = threadIdx.y + blockIdx.y * blockDim.y;
 
-    const int offset_GM = y * INPUT_WIDTH + x;
+    const int offset_GM = y * in_cols + x;
 
     // SHMEM offsets (includes padding)
     int shmemWidth = totalPaddingWidth + blockDim.x;
     int shmemRow = (threadIdx.y + topPadding) * shmemWidth; 
     int shmemRow_plus_x = shmemRow + threadIdx.x;
     int shmemRow_pos_padded = shmemRow_plus_x + leftPadding;
-
+    
     // Initialize shared memory to zero - when block is on edge of grid
     // TODO: try to make more efficent by including in below code if checks
     // As here threads are doing duplicate work
@@ -251,7 +251,7 @@ __device__ void device_CNN_Multi_SHMEM(float *inCh, int filterSize,
     0;
 #endif
     __syncthreads();
-
+    
     // Now setup Shared memory with data
     if (threadIdx.y >= topPadding && threadIdx.y < (blockDim.y - bottomPadding)) { // this could be an else
         // Set left-overs on top left corner
@@ -262,11 +262,11 @@ __device__ void device_CNN_Multi_SHMEM(float *inCh, int filterSize,
 #ifdef DebugSHMEM_Data
             6;
 #else
-            inCh[offset_GM - 2*leftPadding - 2*topPadding*INPUT_WIDTH];
+            inCh[offset_GM - 2*leftPadding - 2*topPadding*in_cols];
 #endif
         }
         // Set left-overs on bottom left corner
-        else if (x >= 2*leftPadding && (y >= (INPUT_HEIGHT - 3*bottomPadding) || threadIdx.y >= (blockDim.y - 3*bottomPadding)) && y < (INPUT_HEIGHT - 2*bottomPadding) &&
+        else if (x >= 2*leftPadding && (y >= (in_rows - 3*bottomPadding) || threadIdx.y >= (blockDim.y - 3*bottomPadding)) && y < (in_rows - 2*bottomPadding) &&
             leftPadding <= threadIdx.x && threadIdx.x < 2*leftPadding) {
             sInCh[shmemRow_plus_x - leftPadding + 2*rightPadding*shmemWidth] = 
 #ifdef DebugSHMEM_Data
@@ -277,11 +277,11 @@ __device__ void device_CNN_Multi_SHMEM(float *inCh, int filterSize,
         }
     }
 
-    if (x >= INPUT_WIDTH || y >= INPUT_HEIGHT) {
+    if (x >= in_cols || y >= in_rows) {
         return;
     }
-
-        // Every Thread in block copies it's value
+    
+    // Every Thread in block copies it's value
     sInCh[shmemRow_pos_padded] = 
 #ifdef DebugSHMEM_Data
     1;
@@ -294,23 +294,23 @@ __device__ void device_CNN_Multi_SHMEM(float *inCh, int filterSize,
 #ifdef DebugSHMEM_Data
         2;
 #else
-        inCh[offset_GM - topPadding*INPUT_WIDTH];
+        inCh[offset_GM - topPadding*in_cols];
 #endif
     }
     // Set bottom padding using all threads in bottomPadding number of rows
-    else if (y < (INPUT_HEIGHT - bottomPadding) && threadIdx.y >= (blockDim.y - bottomPadding)) { //blockIdx.y != lastY => could pass # blocks to kernel or use static #define size -> maybe helps performance try
+    else if (y < (in_rows - bottomPadding) && threadIdx.y >= (blockDim.y - bottomPadding)) { //blockIdx.y != lastY => could pass # blocks to kernel or use static #define size -> maybe helps performance try
         sInCh[shmemRow_pos_padded + bottomPadding * shmemWidth] = 
 #ifdef DebugSHMEM_Data
         3;
 #else
-        inCh[offset_GM + bottomPadding*INPUT_WIDTH];
+        inCh[offset_GM + bottomPadding*in_cols];
 #endif
     }
     // Use remaining threads for left-over area (left, right, corners + top/bottom padding extra on sides)
     // left-over threads = INPUT_HEIGHT - topPadding - bottomPadding 
     else if (threadIdx.y >= topPadding && threadIdx.y < (blockDim.y - bottomPadding)) { // this could be an else
         // Set Left padding 
-        if (y < (INPUT_HEIGHT - bottomPadding) && x >= leftPadding && threadIdx.x < leftPadding) {
+        if (y < (in_rows - bottomPadding) && x >= leftPadding && threadIdx.x < leftPadding) {
             sInCh[shmemRow_plus_x] = 
 #ifdef DebugSHMEM_Data
             4;
@@ -319,7 +319,7 @@ __device__ void device_CNN_Multi_SHMEM(float *inCh, int filterSize,
 #endif
         }
         // Set Right padding
-        else if (y < (INPUT_HEIGHT - bottomPadding) && x < (INPUT_WIDTH - rightPadding) && threadIdx.x >= blockDim.x - rightPadding) {
+        else if (y < (in_rows - bottomPadding) && x < (in_cols - rightPadding) && threadIdx.x >= blockDim.x - rightPadding) {
             sInCh[shmemRow_pos_padded + rightPadding] = 
 #ifdef DebugSHMEM_Data
             5;
@@ -334,7 +334,7 @@ __device__ void device_CNN_Multi_SHMEM(float *inCh, int filterSize,
             sInCh[shmemRow_plus_x - leftPadding - 2*topPadding*shmemWidth] = 6;//in[offset_GM - 2*leftPadding - 2*topPadding*INPUT_WIDTH];
         }*/
         // Set left-overs on top right corner
-        else if (x <= (INPUT_WIDTH - 2*rightPadding) && y >= 2*topPadding &&
+        else if (x <= (in_cols - 2*rightPadding) && y >= 2*topPadding &&
             threadIdx.y < 3*topPadding && 
             (blockDim.x - rightPadding) >= threadIdx.x && threadIdx.x >= (blockDim.x - 2*rightPadding) ) {
             sInCh[shmemRow_pos_padded + 2*rightPadding - 2*topPadding*shmemWidth] = 
@@ -350,8 +350,8 @@ __device__ void device_CNN_Multi_SHMEM(float *inCh, int filterSize,
             sInCh[shmemRow_plus_x - leftPadding + 2*rightPadding*shmemWidth] = 8;            
         }*/
         // Set left-overs on bottom right corner
-        else if (x <= (INPUT_WIDTH - 2*rightPadding) && 
-            (y >= (INPUT_HEIGHT - 3*bottomPadding) || threadIdx.y >= (blockDim.y - 3*bottomPadding)) && y < (INPUT_HEIGHT - 2*bottomPadding) &&
+        else if (x <= (in_cols - 2*rightPadding) && 
+            (y >= (in_rows - 3*bottomPadding) || threadIdx.y >= (blockDim.y - 3*bottomPadding)) && y < (in_rows - 2*bottomPadding) &&
             (blockDim.x - rightPadding) >= threadIdx.x && threadIdx.x >= (blockDim.x - 2*rightPadding)) {
             sInCh[shmemRow_pos_padded + 2*rightPadding + 2*bottomPadding*shmemWidth] = 
 #ifdef DebugSHMEM_Data
@@ -381,27 +381,37 @@ __device__ void device_CNN_Multi_SHMEM(float *inCh, int filterSize,
 
     int cnnOffset = shmemRow_plus_x - topPadding*shmemWidth;
     float cacheIn[COV1_FILTER_N * COV1_FILTER_N]; //TODO: could use templates for filter size
-    for (int i=0, row=0, shmemRowOffset=cnnOffset, filterRowOffset=0; i < filterSize; ++i, row += filterSize, shmemRowOffset += shmemWidth, filterRowOffset += filterSize) {
+    for (int i=0, row=0, shmemRowOffset=cnnOffset; i < filterSize; ++i, row += filterSize, shmemRowOffset += shmemWidth) {
         for (int j = 0; j < filterSize; ++j) {
             cacheIn[row + j] = sInCh[shmemRowOffset + j];
         }
     }
 
-    int filterChOffset = 0;
-    for (int ch=0; ch < 64; ++ch, filterChOffset += filterSize*filterSize) {
+    for (int ch=0; ch < 64; ++ch) {
         //TODO: reduce repeated computations by storing
         //Maybe make loop condition handle outside matrix area instead of continue
         float conv = 0.0;
-        int filterOffset = filterChOffset;
-        for (int i = 0, row=0; i < filterSize; ++i, filterOffset += filterSize, row += filterSize) {
+        for (int i = 0, row=0; i < filterSize; ++i, row += filterSize) {
             for (int j = 0; j < filterSize; ++j) {
-                conv += cacheIn[row + j] * device_cov1_filter[0][ch][i][j]; //[filterOffset + j];
+                conv += cacheIn[row + j] * device_cov1_filter[0][ch][i][j];
             }
         }
         /*if (x == 0 && y == 0) {
             printf("Addr%d: %p %p ", ch, device_output[ch], &device_output[ch]);
         }*/
-        device_output[ch][offset_GM] = relu(conv + device_cov1_b[ch]);
+        if (isSingle) {
+            device_output[ch][offset_GM] = relu(conv + device_cov1_b[ch]);
+        }
+        else if (isFirst) {
+            device_output[ch][offset_GM] = conv;
+        }
+        else if (isLast) {
+            conv += device_output[ch][offset_GM] + device_cov1_b[ch];
+            device_output[ch][offset_GM] = relu(conv);
+        }
+        else {
+            device_output[ch][offset_GM] += conv;
+        }    
     }
 }
 #endif
@@ -411,7 +421,7 @@ __global__ void kernel_multi(int in_cols, int in_rows, float *inCh, int filterSi
     int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
 #ifdef SHMEM
     //printf("%d %d %d %d %d %d", totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
-    device_CNN_Multi_SHMEM(inCh, filterSize,
+    device_CNN_Multi_SHMEM(in_cols, in_rows, inCh, filterSize, isSingle, isFirst, isLast,
         totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
 #else  
     device_CNN_Multi(in_cols, in_rows, inCh, filterSize, isSingle, isFirst, isLast,
@@ -527,18 +537,23 @@ void layer1_maxPool_multi(int in_cols, int in_rows, float **d_input,
     int out_elements = out_rows * out_cols;
     int out_bytes = out_elements * sizeof(float);
 
-    dim3 block(32, 32); // configure
-    dim3 grid(
-            (out_cols + block.x - 1) / block.x,
-            (out_rows + block.y - 1) / block.y);
+    cudaStream_t streams[COV1_FILTER_OUT_CH]; //[COV1_FILTER_OUT_CH];
+    dim3 block((out_cols < 32) ? out_cols : 32, (out_rows < 32) ? out_rows : 32); 
+    dim3 grid( (out_cols + block.x-1) / block.x, 
+               (out_rows + block.y-1) / block.y);
 
     // Get output memory
     for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
+        gpuErrchk(cudaStreamCreate(&streams[ch]));
         gpuErrchk(cudaMalloc((void **)&d_output[ch], out_bytes));
-        max_pool_2d<<<grid, block>>>(d_input[ch], d_output[ch], in_rows, in_cols, POOL_SIZE, POOL_SIZE, STRIDE);
+        max_pool_2d<<<grid, block, 0, streams[ch]>>>(d_input[ch], d_output[ch], in_rows, in_cols, POOL_SIZE, POOL_SIZE, STRIDE);
     }
 
-    gpuErrchk(cudaDeviceSynchronize());
+    //gpuErrchk(cudaDeviceSynchronize());
+    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
+        gpuErrchk(cudaStreamSynchronize(streams[ch]));
+        gpuErrchk(cudaStreamDestroy(streams[ch]));
+    }
 }
 
 void layer2_cov_multi(int in_cols, int in_rows, float **d_input, float **d_output, int filterSize) {
@@ -547,10 +562,10 @@ void layer2_cov_multi(int in_cols, int in_rows, float **d_input, float **d_outpu
     //gpuErrchk(cudaGetSymbolAddress((void**)&filterAddr, device_cov1_filter));
     
     int bytes = in_cols * in_rows * sizeof(float);
-    dim3 block(32, 32); // configure
-    dim3 grid(
-            (in_cols + block.x - 1) / block.x,
-            (in_rows + block.y - 1) / block.y);
+    dim3 block((in_cols < 32) ? in_cols : 32, (in_rows < 32) ? in_rows : 32); 
+    dim3 grid( (in_cols + block.x-1) / block.x, 
+               (in_rows + block.y-1) / block.y);
+
 
     // Get output memory
     for (int ch=0; ch < COV2_FILTER_OUT_CH; ++ch) {
@@ -564,7 +579,8 @@ void layer2_cov_multi(int in_cols, int in_rows, float **d_input, float **d_outpu
     int topPadding, leftPadding, bottomPadding, rightPadding;
     getConvPadding(filterSize, totalPaddingHeight, totalPaddingWidth,
         topPadding, leftPadding, bottomPadding, rightPadding);
-    
+    //printf("%d %d %d %d\n", totalPaddingHeight, totalPaddingWidth, topPadding, leftPadding);
+
 #ifdef SHMEM
     const int shmemSize = (in_rows + totalPaddingHeight) * (in_cols + totalPaddingWidth) * sizeof(float);
 #endif
@@ -573,8 +589,8 @@ void layer2_cov_multi(int in_cols, int in_rows, float **d_input, float **d_outpu
         setUpCNNFilters(host_cov1_b, &host_cov1_filter[0][0][0][0]); //TODO UPdate for each iteration
 
 #ifdef SHMEM
-        kernel_multi<<<grid, block, shmemSize>>>(d_input[ch], filterSize, 
-            totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);   
+        kernel_multi<<<grid, block, shmemSize>>>(in_cols, in_rows, d_input[ch], filterSize, false, (ch == 0) ? true : false, (ch == (COV2_FILTER_OUT_CH-1)) ? true : false,
+                totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);   
 #else
         kernel_multi<<<grid, block>>>(in_cols, in_rows, d_input[ch], filterSize, false, (ch == 0) ? true : false, (ch == (COV2_FILTER_OUT_CH-1)) ? true : false,
                 totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
