@@ -3,7 +3,7 @@
 #define COV1_FILTER_IN_CH 1
 #define COV1_FILTER_OUT_CH 64 // Can set to 1 when debugging shared memory and printing data in kernel
 
-#define COV2_FILTER_N 2 // 4x4
+#define COV2_FILTER_N 4 // 4x4
 #define COV2_FILTER_IN_CH 64
 #define COV2_FILTER_OUT_CH 64
 
