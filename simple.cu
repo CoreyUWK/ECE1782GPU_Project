@@ -38,35 +38,19 @@ However, threads will not be indexed top left of convolution with filter
 #include <mutex>
 #include <algorithm>
 #include "cnn_weights.cu"
+#include "utils.cu"
 
 //#define PRINTDATA 1
 #define EnableLock 1
 
-#define SHMEM 1
+//#define SHMEM 1
 //#define DebugSHMEM 1
 //#define DebugSHMEM_Data 1
 
 #define INPUT_WIDTH 100//2048//100
 #define INPUT_HEIGHT 56//2048//56
 
-#define NUM_STREAM 16
-
-/*You can use the following for any CUDA function that returns cudaError_t type*/
-#define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
-inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
-{
-    if (code == cudaSuccess) return;
-
-    fprintf(stderr,"Error: %s %s %d\n", cudaGetErrorString(code), file, line);
-    if (abort) exit(code);
-}
-
-/*Use the following to get a timestamp*/
-double getTimeStamp() {
-        struct timeval tv;
-        gettimeofday( &tv, NULL );
-        return (double) tv.tv_usec/1000000 + tv.tv_sec;
-}
+#define NUM_STREAM 200
 
 /*
 https://stackoverflow.com/questions/37674306/what-is-the-difference-between-same-and-valid-padding-in-tf-nn-max-pool-of-t
@@ -394,35 +378,7 @@ __global__ void kernel(float *inCh, float *outCh, float b, float *filter, int fi
 }
 
 
-// Generate Input Data
-void initData(float *in, int width, int height, int padding) {
-    int offset;
-    const float magicNum = 1.1;
-
-    for (int i = padding; i < height - padding; ++i) {
-        for (int j = padding; j < width - padding; ++j) {
-            offset = i * width + j;
-            // printf("(%d,%d)=%d ", i, j, offset);
-            in[offset] = 1.0; //((i+j) % 10) * magicNum; //TODO: Update value to be accurate
-        }
-    }
-}
-
-void Print2D(float *m, int width, int height) {
-    for (int i = 0, row=0; i < height; ++i, row += width) { // Row
-        printf("%d:\t", i);
-        for (int j = 0; j < width; ++j) { // Col
-            printf("%.6f\t", m[row + j]);
-        }
-        printf("\n");
-    }
-}
-
-int getPadding(int filter) {
-    return filter / 2;
-}
-
-float* allocHostBlock(std::vector<float*> &h_freeBlocks, std::mutex &h_freeBlocksMutex, int bytes) {
+float* allocHostBlockHelper(std::vector<float*> &h_freeBlocks, std::mutex &h_freeBlocksMutex, int bytes) {
     float *mem = NULL;
 
 #ifdef EnableLock
@@ -436,13 +392,13 @@ float* allocHostBlock(std::vector<float*> &h_freeBlocks, std::mutex &h_freeBlock
     h_freeBlocksMutex.unlock();
 #endif
     if (mem == NULL) {
-        mem = (float *)malloc(bytes);
+        mem = allocHostBlock(bytes);
     }
 
     return mem;
 }
 
-float* allocDeviceBlock(std::vector<float*> &d_freeBlocks, std::mutex &d_freeBlocksMutex, int bytes) {
+float* allocDeviceBlockHelper(std::vector<float*> &d_freeBlocks, std::mutex &d_freeBlocksMutex, int bytes) {
     float *mem = NULL;
 
 #ifdef EnableLock
@@ -456,7 +412,7 @@ float* allocDeviceBlock(std::vector<float*> &d_freeBlocks, std::mutex &d_freeBlo
     d_freeBlocksMutex.unlock();
 #endif
     if (mem == NULL) {
-        gpuErrchk(cudaMalloc((void **)&mem, bytes));
+        mem = allocDeviceBlock(bytes);
     }
 
     return mem;
@@ -533,12 +489,11 @@ void layer1_cov1(int bytes, dim3 grid, dim3 block, cudaStream_t *streams,
     std::vector<float*> *d_freeBlocks, std::mutex *d_freeBlocksMutex,
     std::vector<int> *freeStreams, std::mutex *freeStreamsMutex) {
     
-    const int totalPaddingHeight = COV1_FILTER_N - 1;
-    const int totalPaddingWidth = COV1_FILTER_N - 1;
-    const int topPadding = totalPaddingHeight / 2;
-    const int leftPadding = totalPaddingWidth / 2;
-    const int bottomPadding = totalPaddingHeight - topPadding;
-    const int rightPadding = totalPaddingWidth - leftPadding;
+    int totalPaddingHeight, totalPaddingWidth;
+    int topPadding, leftPadding, bottomPadding, rightPadding;
+    getConvPadding(COV1_FILTER_N, totalPaddingHeight, 
+        totalPaddingWidth, topPadding, leftPadding,
+        bottomPadding, rightPadding);
 
     const int shmemSize = (INPUT_HEIGHT + totalPaddingHeight) * (INPUT_WIDTH + totalPaddingWidth) * sizeof(float);
 
@@ -662,13 +617,14 @@ int main( int argc, char *argv[])
     gpuErrchk(cudaDeviceReset());
 
     // Allocate intial input to CNN
-    float *h_input = allocHostBlock(h_freeBlocks, h_freeBlocksMutex, bytes);
+    float *h_input = allocHostBlockHelper(h_freeBlocks, h_freeBlocksMutex, bytes);
     if (h_input == NULL) {
         printf("Error: Failed to allocte host memory for input");
         return 1;
     }
-    initData(h_input, INPUT_WIDTH, INPUT_HEIGHT, 0);
-    float *d_input = allocDeviceBlock(d_freeBlocks, d_freeBlocksMutex, bytes);
+    float value = 1.0;
+    initData(h_input, INPUT_WIDTH, INPUT_HEIGHT, 0, &value);
+    float *d_input = allocDeviceBlockHelper(d_freeBlocks, d_freeBlocksMutex, bytes);
     if (d_input == NULL) {
         printf("Error: Failed to allocte host memory for input");
         return 1;
@@ -678,7 +634,7 @@ int main( int argc, char *argv[])
     // Allocate host output to print results for debugging
     float *h_output[COV1_FILTER_OUT_CH];
     for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
-        h_output[ch] = allocHostBlock(h_freeBlocks, h_freeBlocksMutex, bytes);
+        h_output[ch] = allocHostBlockHelper(h_freeBlocks, h_freeBlocksMutex, bytes);
         if (h_output[ch] == NULL) {
             printf("Error: Failed to allocte host memory for output ch %d", ch);
             //TODO: need to clean up allocated upto this point
