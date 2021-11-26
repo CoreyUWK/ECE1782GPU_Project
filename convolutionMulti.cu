@@ -45,7 +45,7 @@ However, threads will not be indexed top left of convolution with filter
 #include "utils.cu"
 
 //#define PRINTDATA 1
-// #define SHMEM 1
+#define SHMEM 1
 //#define DebugSHMEM 1
 //#define DebugSHMEM_Data 1
 
@@ -100,113 +100,6 @@ __global__ void max_pool_2d(float *in, int in_rows, int in_cols, float *out, int
 }
 
 __constant__ float *device_output[COV1_FILTER_OUT_CH];
-//template <int filterSize> // Can't template cause multiple functions with some at 77 registers
-__global__ void device_CNN_Multi_v1(int in_cols, int in_rows, float *inCh, int filterSize, bool isSingle, bool isFirst, bool isLast,
-    int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
-    // Position relative to global memory of 2D matrix
-    const int x = threadIdx.x + blockIdx.x * blockDim.x;
-    const int y = threadIdx.y + blockIdx.y * blockDim.y;
-
-    if (x >= in_cols || y >= in_rows) {
-        return;
-    }
-    int totalFilterSize = filterSize*filterSize;
-
-    const int offset_GM = y * in_cols + x;
-    int cnnOffset = offset_GM - topPadding*in_cols - leftPadding;
-    float cacheIn[COV1_FILTER_N * COV1_FILTER_N]; //NOTE requires constant size arg, else compiler complains (so constant memory), could make template
-    int boundryH = y - topPadding;
-    int boundryW = x - leftPadding;
-    int i = 0;
-    for (int row=0; i < filterSize; ++i, row += filterSize, cnnOffset += in_cols, ++boundryH) {
-        for (int j = 0; j < filterSize; ++j) {
-            if (boundryH < 0 || boundryH >= in_rows || 
-                (boundryW + j < 0) || (boundryW + j >= in_cols)) {
-                cacheIn[row + j] = 0;
-            }               
-            else {
-                cacheIn[row + j] = inCh[cnnOffset + j];
-            }
-        }
-    }
-
-    float *f = &device_cov1_filter[0][0][0][0];
-    for (int ch=0, filterChOffset = 0; ch < COV1_FILTER_OUT_CH; ++ch, filterChOffset += totalFilterSize) {
-        float conv = 0.0;
-        for (i = 0; i < totalFilterSize; ++i) {
-            conv += cacheIn[i] * *(f + filterChOffset + i);
-        }
-        if (isSingle) {
-            device_output[ch][offset_GM] = relu(conv + device_cov1_b[ch]);
-        }
-        else if (isFirst) {
-            device_output[ch][offset_GM] = conv;
-        }
-        else if (isLast) {
-            conv += device_output[ch][offset_GM] + device_cov1_b[ch];
-            device_output[ch][offset_GM] = relu(conv);
-        }
-        else {
-            device_output[ch][offset_GM] += conv;
-        }
-    }
-}
-
-__global__ void device_CNN_Multi_v2(int in_cols, int in_rows, float *inCh, int filterSize, bool isFirst, bool isLast,
-    int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
-    // Position relative to global memory of 2D matrix
-    const int x = threadIdx.x + blockIdx.x * blockDim.x;
-    const int y = threadIdx.y + blockIdx.y * blockDim.y;
-
-    if (x >= in_cols || y >= in_rows) {
-        return;
-    }
-
-    const int offset_GM = y * in_cols + x;
-    int cnnOffset = offset_GM - topPadding*in_cols - leftPadding;
-
-    //float covResult[64]; // To many registers so have to use GMEM of output
-    float readVal;
-    int boundryHeight = y - topPadding;
-    int boundryWidth = x - leftPadding;
-    int filterTotalSize = filterSize*filterSize;
-    float *f = &device_cov1_filter[0][0][0][0];
-    int ch, filterChOffset;
-    for (int i = 0, row=0; i < filterSize; ++i, row += filterSize, cnnOffset += in_cols, ++boundryHeight) {
-        if (boundryHeight < 0 || boundryHeight >= in_rows) continue;
-        for (int j = 0; j < filterSize; ++j) {
-            if ((boundryWidth + j < 0) || (boundryWidth + j >= in_cols)) continue;
-            
-            readVal = inCh[cnnOffset + j];
-            for (ch=0, filterChOffset=0; ch < 64; ++ch, filterChOffset += filterTotalSize) {
-                //covResult[ch] += readVal * *(f + filterChOffset + row + j);
-                //covResult[ch] = __fmaf_rd(readVal, *(f + filterChOffset + row + j), covResult[ch]);
-                if (i == 0 && isFirst) {
-                    device_output[ch][offset_GM] = readVal * *(f + filterChOffset + row + j);
-                }
-                else {
-                    device_output[ch][offset_GM] += readVal * *(f + filterChOffset + row + j);
-                }
-            }
-        }
-    }
-
-    if (isLast) {
-        for (ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
-            device_output[ch][offset_GM] = relu(device_output[ch][offset_GM] + device_cov1_b[ch]);
-            /*else if (isFirst) {
-                device_output[ch][offset_GM] = device_output[ch][offset_GM];
-            }*/
-            /*else if (isLast) {
-                covResult[ch] += device_output[ch][offset_GM] + device_cov1_b[ch];
-                device_output[ch][offset_GM] = relu(covResult[ch]);
-            }*/
-            /*else {
-                device_output[ch][offset_GM] += covResult[ch];
-            }*/
-        }
-    }
-}
 
 #ifdef SHMEM
 __global__ void device_CNN_Multi_SHMEM(int in_cols, int in_rows, float *inCh, int filterSize, bool isSingle, bool isFirst, bool isLast,
@@ -405,35 +298,142 @@ __global__ void device_CNN_Multi_SHMEM(int in_cols, int in_rows, float *inCh, in
 #endif
 
     int cnnOffset = shmemRow_plus_x - topPadding*shmemWidth;
-    float covResult[64];
-    float readVal;
+    float cacheIn[COV1_FILTER_N * COV1_FILTER_N];
     float *f = &device_cov1_filter[0][0][0][0];
-    int filterTotalSize = filterSize*filterSize;
-
-    for (int i=0, row=0, shmemRowOffset=cnnOffset; i < filterSize; ++i, row += filterSize, shmemRowOffset += shmemWidth) {
+    int totalFilterSize = filterSize*filterSize;
+    int i = 0;
+    for (int row=0, shmemRowOffset=cnnOffset; i < filterSize; ++i, row += filterSize, shmemRowOffset += shmemWidth) {
         for (int j = 0; j < filterSize; ++j) {
-            readVal = sInCh[shmemRowOffset + j];
+            cacheIn[row + j] = sInCh[shmemRowOffset + j];
+        }
+    }
 
-            for (int ch=0, filterChOffset=0; ch < 64; ++ch, filterChOffset += filterTotalSize) {
-                covResult[ch] += readVal * *(f + filterChOffset + row + j);
-                //covResult[ch] = __fmaf_rd(readVal, *(f + filterChOffset + row + j), covResult[ch]);
+    for (int ch=0, filterChOffset = 0; ch < COV1_FILTER_OUT_CH; ++ch, filterChOffset += totalFilterSize) {
+        float conv = 0.0;
+        for (i = 0; i < totalFilterSize; ++i) {
+            conv += cacheIn[i] * *(f + filterChOffset + i);
+        }
+        if (isSingle) {
+            device_output[ch][offset_GM] = relu(conv + device_cov1_b[ch]);
+        }
+        else if (isFirst) {
+            device_output[ch][offset_GM] = conv;
+        }
+        else if (isLast) {
+            conv += device_output[ch][offset_GM] + device_cov1_b[ch];
+            device_output[ch][offset_GM] = relu(conv);
+        }
+        else {
+            device_output[ch][offset_GM] += conv;
+        }
+    }
+}
+#else
+//template <int filterSize> // Can't template cause multiple functions with some at 77 registers
+__global__ void device_CNN_Multi_v1(int in_cols, int in_rows, float *inCh, int filterSize, bool isSingle, bool isFirst, bool isLast,
+    int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
+    // Position relative to global memory of 2D matrix
+    const int x = threadIdx.x + blockIdx.x * blockDim.x;
+    const int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+    if (x >= in_cols || y >= in_rows) {
+        return;
+    }
+    int totalFilterSize = filterSize*filterSize;
+
+    const int offset_GM = y * in_cols + x;
+    int cnnOffset = offset_GM - topPadding*in_cols - leftPadding;
+    float cacheIn[COV1_FILTER_N * COV1_FILTER_N]; //NOTE requires constant size arg, else compiler complains (so constant memory), could make template
+    int boundryH = y - topPadding;
+    int boundryW = x - leftPadding;
+    int i = 0;
+    for (int row=0; i < filterSize; ++i, row += filterSize, cnnOffset += in_cols, ++boundryH) {
+        for (int j = 0; j < filterSize; ++j) {
+            if (boundryH < 0 || boundryH >= in_rows || 
+                (boundryW + j < 0) || (boundryW + j >= in_cols)) {
+                cacheIn[row + j] = 0;
+            }               
+            else {
+                cacheIn[row + j] = inCh[cnnOffset + j];
             }
         }
     }
 
-    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
+    float *f = &device_cov1_filter[0][0][0][0];
+    for (int ch=0, filterChOffset = 0; ch < COV1_FILTER_OUT_CH; ++ch, filterChOffset += totalFilterSize) {
+        float conv = 0.0;
+        for (i = 0; i < totalFilterSize; ++i) {
+            conv += cacheIn[i] * *(f + filterChOffset + i);
+        }
         if (isSingle) {
-            device_output[ch][offset_GM] = relu(covResult[ch] + device_cov1_b[ch]);
+            device_output[ch][offset_GM] = relu(conv + device_cov1_b[ch]);
         }
         else if (isFirst) {
-            device_output[ch][offset_GM] = covResult[ch];
+            device_output[ch][offset_GM] = conv;
         }
         else if (isLast) {
-            covResult[ch] += device_output[ch][offset_GM] + device_cov1_b[ch];
-            device_output[ch][offset_GM] = relu(covResult[ch]);
+            conv += device_output[ch][offset_GM] + device_cov1_b[ch];
+            device_output[ch][offset_GM] = relu(conv);
         }
         else {
-            device_output[ch][offset_GM] += covResult[ch];
+            device_output[ch][offset_GM] += conv;
+        }
+    }
+}
+
+__global__ void device_CNN_Multi_v2(int in_cols, int in_rows, float *inCh, int filterSize, bool isSingle, bool isFirst, bool isLast,
+    int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
+    // Position relative to global memory of 2D matrix
+    const int x = threadIdx.x + blockIdx.x * blockDim.x;
+    const int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+    if (x >= in_cols || y >= in_rows) {
+        return;
+    }
+
+    const int offset_GM = y * in_cols + x;
+    int cnnOffset = offset_GM - topPadding*in_cols - leftPadding;
+
+    //float covResult[64]; // To many registers so have to use GMEM of output
+    float readVal;
+    int boundryHeight = y - topPadding;
+    int boundryWidth = x - leftPadding;
+    int filterTotalSize = filterSize*filterSize;
+    float *f = &device_cov1_filter[0][0][0][0];
+    int ch, filterChOffset;
+
+    for (int i = 0, row=0; i < filterSize; ++i, row += filterSize, cnnOffset += in_cols, ++boundryHeight) {
+        if (boundryHeight < 0 || boundryHeight >= in_rows) continue;
+        for (int j = 0; j < filterSize; ++j) {
+            if ((boundryWidth + j < 0) || (boundryWidth + j >= in_cols)) continue;
+            
+            readVal = inCh[cnnOffset + j];
+            for (ch=0, filterChOffset=0; ch < 64; ++ch, filterChOffset += filterTotalSize) {
+                //covResult[ch] += readVal * *(f + filterChOffset + row + j);
+                //covResult[ch] = __fmaf_rd(readVal, *(f + filterChOffset + row + j), covResult[ch]);
+                if (i == 0 && isFirst) {
+                    device_output[ch][offset_GM] = readVal * *(f + filterChOffset + row + j);
+                }
+                else {
+                    device_output[ch][offset_GM] += readVal * *(f + filterChOffset + row + j);
+                }
+            }
+        }
+    }
+
+    if (isLast) {
+        for (ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
+            device_output[ch][offset_GM] = relu(device_output[ch][offset_GM] + device_cov1_b[ch]);
+            /*else if (isFirst) {
+                device_output[ch][offset_GM] = device_output[ch][offset_GM];
+            }*/
+            /*else if (isLast) {
+                covResult[ch] += device_output[ch][offset_GM] + device_cov1_b[ch];
+                device_output[ch][offset_GM] = relu(covResult[ch]);
+            }*/
+            /*else {
+                device_output[ch][offset_GM] += covResult[ch];
+            }*/
         }
     }
 }
