@@ -44,7 +44,7 @@ However, threads will not be indexed top left of convolution with filter
 //#include "cublas_v2.h"
 #include "utils.cu"
 
-//#define PRINTDATA 1
+#define PRINTDATA 1
 #define SHMEM 1
 //#define DebugSHMEM 1
 //#define DebugSHMEM_Data 1
@@ -452,6 +452,18 @@ __global__ void device_CNN_Multi_v2(int in_cols, int in_rows, float *inCh, int f
 /*#endif
 }*/
 
+__global__ void flatten(float *d_conv_out, float *d_flattened, int channel, int size) {
+    int x = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (x >= size) {
+        return;
+    }
+
+    int offset = channel*size;
+
+    d_flattened[offset+x] = d_conv_out[x];
+}
+
 void setUpCNNFilters(float *host_cov_b, float * host_cov_filter) {
     gpuErrchk( cudaMemcpyToSymbol(device_cov1_b, host_cov_b, COV1_FILTER_OUT_CH*sizeof(float), 
         0, cudaMemcpyHostToDevice) );
@@ -679,24 +691,47 @@ int main( int argc, char *argv[])
         gpuErrchk(cudaFree(d_in[ch]));
     }
 
+    float *d_flattened;
+    gpuErrchk( cudaMalloc( (void **) &d_flattened, COV3_FILTER_OUT_CH*out_col*out_row * sizeof(float) ) );
+    for(int ch = 0; ch < COV3_FILTER_OUT_CH; ch++) {
+        flatten<<<64, 1024>>>(d_out[ch], d_flattened, ch, out_row*out_col);
+    }
+    
+
     double end_time=getTimeStamp();
 //================= Timing Ends ========================    
     int total_time_ms = (int)ceil((end_time-start_time)*1000);
     //int constMemFilter_time_ms = (int)ceil((constMemFilter_time - start_time)*1000);
     
-#ifdef PRINTDATA
-    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
-        gpuErrchk(cudaMemcpy(h_output[ch], d_out[ch], out_col*out_row*sizeof(float), cudaMemcpyDeviceToHost));
-    //}
-    //for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
-        // Need to wait for stream to complete copy
-        gpuErrchk(cudaHostUnregister(h_output[ch]));
+// #ifdef PRINTDATA
+//     for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
+//         gpuErrchk(cudaMemcpy(h_output[ch], d_out[ch], out_col*out_row*sizeof(float), cudaMemcpyDeviceToHost));
+//     //}
+//     //for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
+//         // Need to wait for stream to complete copy
+//         gpuErrchk(cudaHostUnregister(h_output[ch]));
         
-        printf("Output ch%d:\n", ch);
-        Print2D(h_output[ch], out_col, out_row);
+//         printf("Output ch%d:\n", ch);
+//         Print2D(h_output[ch], out_col, out_row);
 
-        free(h_output[ch]);
-    }
+//         free(h_output[ch]);
+//     }
+// #endif
+
+#ifdef PRINTDATA
+    int flattenedBytes = COV3_FILTER_OUT_CH*out_col*out_row*sizeof(float);
+    float *h_flattened = (float *) malloc (flattenedBytes);
+    gpuErrchk(cudaMemcpy(h_flattened, d_flattened, flattenedBytes, cudaMemcpyDeviceToHost));
+
+    for (int i = 0; i < COV3_FILTER_OUT_CH; i++) {
+        for (int j = 0; j < out_row; j++) {
+            for (int k = 0; k < out_col; k++) {
+                printf("%f ", h_flattened[k + j*out_col + i*out_row*out_col]);
+            }
+            printf("\n");
+        }
+        printf("\n");
+    }    
 #endif
     
     for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
