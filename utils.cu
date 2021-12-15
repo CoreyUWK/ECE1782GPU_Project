@@ -65,6 +65,16 @@ void Print2D(float *m, int width, int height) {
     }
 }
 
+void Print2DNoDecimal(float *m, int width, int height) {
+    for (int i = 0, row=0; i < height; ++i, row += width) { // Row
+        printf("%d:\t", i);
+        for (int j = 0; j < width; ++j) { // Col
+            printf("%.0f\t", m[row + j]);
+        }
+        printf("\n");
+    }
+}
+
 #define POOL_SIZE 2
 #define STRIDE POOL_SIZE
 void maxPoolOutSize(int in_rows, int in_cols, int &out_rows, int &out_cols) {

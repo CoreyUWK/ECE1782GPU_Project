@@ -45,7 +45,7 @@ However, threads will not be indexed top left of convolution with filter
 #include "utils.cu"
 
 //#define PRINTDATA 1
-#define SHMEM 1
+//#define SHMEM 1
 //#define DebugSHMEM 1
 //#define DebugSHMEM_Data 1
 
@@ -302,6 +302,7 @@ __global__ void device_CNN_Multi_SHMEM(int in_cols, int in_rows, float *inCh, in
     float *f = &device_cov1_filter[0][0][0][0];
     int totalFilterSize = filterSize*filterSize;
     int i = 0;
+
     for (int row=0, shmemRowOffset=cnnOffset; i < filterSize; ++i, row += filterSize, shmemRowOffset += shmemWidth) {
         for (int j = 0; j < filterSize; ++j) {
             cacheIn[row + j] = sInCh[shmemRowOffset + j];
@@ -330,7 +331,7 @@ __global__ void device_CNN_Multi_SHMEM(int in_cols, int in_rows, float *inCh, in
 }
 #else
 //template <int filterSize> // Can't template cause multiple functions with some at 77 registers
-__global__ void device_CNN_Multi_v1(int in_cols, int in_rows, float *inCh, int filterSize, bool isSingle, bool isFirst, bool isLast,
+__global__ void device_CNN_Multi_v1_single(int in_cols, int in_rows, float *inCh, int filterSize,
     int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
     // Position relative to global memory of 2D matrix
     const int x = threadIdx.x + blockIdx.x * blockDim.x;
@@ -347,6 +348,7 @@ __global__ void device_CNN_Multi_v1(int in_cols, int in_rows, float *inCh, int f
     int boundryH = y - topPadding;
     int boundryW = x - leftPadding;
     int i = 0;
+    
     for (int row=0; i < filterSize; ++i, row += filterSize, cnnOffset += in_cols, ++boundryH) {
         for (int j = 0; j < filterSize; ++j) {
             if (boundryH < 0 || boundryH >= in_rows || 
@@ -359,27 +361,136 @@ __global__ void device_CNN_Multi_v1(int in_cols, int in_rows, float *inCh, int f
         }
     }
 
-    float *f = &device_cov1_filter[0][0][0][0];
-    for (int ch=0, filterChOffset = 0; ch < COV1_FILTER_OUT_CH; ++ch, filterChOffset += totalFilterSize) {
-        float conv = 0.0;
-        for (i = 0; i < totalFilterSize; ++i) {
-            conv += cacheIn[i] * *(f + filterChOffset + i);
+    float *filterChOffset = &device_cov1_filter[0][0][0][0];
+    float conv;
+    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch, filterChOffset += totalFilterSize) {
+        for (i = 0, conv = 0.0; i < totalFilterSize; ++i) {
+            conv += cacheIn[i] * *(filterChOffset + i);
         }
-        if (isSingle) {
-            device_output[ch][offset_GM] = relu(conv + device_cov1_b[ch]);
-        }
-        else if (isFirst) {
-            device_output[ch][offset_GM] = conv;
-        }
-        else if (isLast) {
-            conv += device_output[ch][offset_GM] + device_cov1_b[ch];
-            device_output[ch][offset_GM] = relu(conv);
-        }
-        else {
-            device_output[ch][offset_GM] += conv;
-        }
+        device_output[ch][offset_GM] = relu(conv + device_cov1_b[ch]);
     }
 }
+__global__ void device_CNN_Multi_v1_first(int in_cols, int in_rows, float *inCh, int filterSize, 
+    int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
+    // Position relative to global memory of 2D matrix
+    const int x = threadIdx.x + blockIdx.x * blockDim.x;
+    const int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+    if (x >= in_cols || y >= in_rows) {
+        return;
+    }
+    int totalFilterSize = filterSize*filterSize;
+
+    const int offset_GM = y * in_cols + x;
+    int cnnOffset = offset_GM - topPadding*in_cols - leftPadding;
+    float cacheIn[COV1_FILTER_N * COV1_FILTER_N]; //NOTE requires constant size arg, else compiler complains (so constant memory), could make template
+    int boundryH = y - topPadding;
+    int boundryW = x - leftPadding;
+    int i = 0;
+    
+    for (int row=0; i < filterSize; ++i, row += filterSize, cnnOffset += in_cols, ++boundryH) {
+        for (int j = 0; j < filterSize; ++j) {
+            if (boundryH < 0 || boundryH >= in_rows || 
+                (boundryW + j < 0) || (boundryW + j >= in_cols)) {
+                cacheIn[row + j] = 0;
+            }               
+            else {
+                cacheIn[row + j] = inCh[cnnOffset + j];
+            }
+        }
+    }
+
+    float *filterChOffset = &device_cov1_filter[0][0][0][0];
+    float conv;
+    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch, filterChOffset += totalFilterSize) {
+        for (i = 0, conv = 0.0; i < totalFilterSize; ++i) {
+            conv += cacheIn[i] * *(filterChOffset + i);
+        }
+        device_output[ch][offset_GM] = conv;
+    }
+}
+__global__ void device_CNN_Multi_v1_middle(int in_cols, int in_rows, float *inCh, int filterSize,
+    int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
+    // Position relative to global memory of 2D matrix
+    const int x = threadIdx.x + blockIdx.x * blockDim.x;
+    const int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+    if (x >= in_cols || y >= in_rows) {
+        return;
+    }
+    int totalFilterSize = filterSize*filterSize;
+
+    const int offset_GM = y * in_cols + x;
+    int cnnOffset = offset_GM - topPadding*in_cols - leftPadding;
+    float cacheIn[COV1_FILTER_N * COV1_FILTER_N]; //NOTE requires constant size arg, else compiler complains (so constant memory), could make template
+    int boundryH = y - topPadding;
+    int boundryW = x - leftPadding;
+    int i = 0;
+    
+    for (int row=0; i < filterSize; ++i, row += filterSize, cnnOffset += in_cols, ++boundryH) {
+        for (int j = 0; j < filterSize; ++j) {
+            if (boundryH < 0 || boundryH >= in_rows || 
+                (boundryW + j < 0) || (boundryW + j >= in_cols)) {
+                cacheIn[row + j] = 0;
+            }               
+            else {
+                cacheIn[row + j] = inCh[cnnOffset + j];
+            }
+        }
+    }
+
+    float *filterChOffset = &device_cov1_filter[0][0][0][0];
+    float conv;
+    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch, filterChOffset += totalFilterSize) {
+        for (i = 0, conv = 0.0; i < totalFilterSize; ++i) {
+            conv += cacheIn[i] * *(filterChOffset + i);
+        }
+        device_output[ch][offset_GM] += conv;
+    }
+}
+__global__ void device_CNN_Multi_v1_last(int in_cols, int in_rows, float *inCh, int filterSize,
+    int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
+    // Position relative to global memory of 2D matrix
+    const int x = threadIdx.x + blockIdx.x * blockDim.x;
+    const int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+    if (x >= in_cols || y >= in_rows) {
+        return;
+    }
+    int totalFilterSize = filterSize*filterSize;
+
+    const int offset_GM = y * in_cols + x;
+    int cnnOffset = offset_GM - topPadding*in_cols - leftPadding;
+    float cacheIn[COV1_FILTER_N * COV1_FILTER_N]; //NOTE requires constant size arg, else compiler complains (so constant memory), could make template
+    int boundryH = y - topPadding;
+    int boundryW = x - leftPadding;
+    int i = 0;
+    
+    for (int row=0; i < filterSize; ++i, row += filterSize, cnnOffset += in_cols, ++boundryH) {
+        for (int j = 0; j < filterSize; ++j) {
+            if (boundryH < 0 || boundryH >= in_rows || 
+                (boundryW + j < 0) || (boundryW + j >= in_cols)) {
+                cacheIn[row + j] = 0;
+            }               
+            else {
+                cacheIn[row + j] = inCh[cnnOffset + j];
+            }
+        }
+    }
+
+    float *filterChOffset = &device_cov1_filter[0][0][0][0];
+    float *out;
+    float conv;
+    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch, filterChOffset += totalFilterSize) {
+        for (i = 0, conv = 0.0; i < totalFilterSize; ++i) {
+            conv += cacheIn[i] * *(filterChOffset + i);
+        }
+        out = &device_output[ch][offset_GM];
+        conv += *out + device_cov1_b[ch];
+        *out = relu(conv);
+    }
+}
+
 
 __global__ void device_CNN_Multi_v2(int in_cols, int in_rows, float *inCh, int filterSize, bool isSingle, bool isFirst, bool isLast,
     int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
@@ -493,8 +604,8 @@ void layer1_cov1_multi(int bytes, dim3 grid, dim3 block,
     device_CNN_Multi_SHMEM<<<grid, block, shmemSize>>>(INPUT_WIDTH, INPUT_HEIGHT, d_input, COV1_FILTER_N, true, false, false,
         totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);   
 #else
-    device_CNN_Multi_v1<<<grid, block>>>(INPUT_WIDTH, INPUT_HEIGHT, d_input, COV1_FILTER_N, true, false, false,
-                totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
+    device_CNN_Multi_v1_single<<<grid, block>>>(INPUT_WIDTH, INPUT_HEIGHT, d_input, COV1_FILTER_N,
+        totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
 #endif
 
     gpuErrchk(cudaDeviceSynchronize());
@@ -563,10 +674,20 @@ void layer2_cov_multi(int filterSize, int in_cols, int in_rows, float **d_input,
 
 #ifdef SHMEM
         device_CNN_Multi_SHMEM<<<grid, block, shmemSize>>>(in_cols, in_rows, d_input[ch], filterSize, false, (ch == 0) ? true : false, (ch == (COV2_FILTER_OUT_CH-1)) ? true : false,
-                totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);   
+            totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);   
 #else
-        device_CNN_Multi_v1<<<grid, block>>>(in_cols, in_rows, d_input[ch], filterSize, false, (ch == 0) ? true : false, (ch == (COV2_FILTER_OUT_CH-1)) ? true : false,
+        if (ch == 0) {
+            device_CNN_Multi_v1_first<<<grid, block>>>(in_cols, in_rows, d_input[ch], filterSize,
                 totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
+        }
+        else if (ch == (COV2_FILTER_OUT_CH-1)) {
+            device_CNN_Multi_v1_last<<<grid, block>>>(in_cols, in_rows, d_input[ch], filterSize,
+                totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
+        }
+        else {
+            device_CNN_Multi_v1_middle<<<grid, block>>>(in_cols, in_rows, d_input[ch], filterSize,
+                totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
+        }
 #endif
         gpuErrchk(cudaDeviceSynchronize());
     }
