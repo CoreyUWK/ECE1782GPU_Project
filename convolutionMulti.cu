@@ -58,6 +58,12 @@ However, threads will not be indexed top left of convolution with filter
 #define POOL_SIZE 2
 #define STRIDE POOL_SIZE
 
+// Linear Config
+#define INPUT_SIZE1 22400
+#define OUTPUT_SIZE1 256
+#define INPUT_SIZE2 256
+#define OUTPUT_SIZE2 3
+
 
 // Currently a thread per pooling, but thread no reading coalesed
 // could read coalesed by copying to shared memory and then reorder in shared memory linearly
@@ -464,6 +470,49 @@ __global__ void flatten(float *d_conv_out, float *d_flattened, int channel, int 
     d_flattened[offset+x] = d_conv_out[x];
 }
 
+__global__ void linear(float *output, float *input, float *W, float *b, int inSize, int outSize, bool isFinal) {
+    int j = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if ((j >= outSize)) {
+        return;
+    }
+
+    float sum = 0.0;
+    for (int i = 0; i < inSize; i++) {
+        int offset = i * outSize + j;
+        sum += input[i] * W[offset];
+    }
+
+    // final linear layer don't use relu
+    if (isFinal) {
+        output[j] = sum + b[j];
+    }
+    else {
+        output[j] = relu(sum + b[j]);
+    }
+}
+
+float* softmax(int size, float* z)
+{
+    float max = 0;
+    for (int i = 0; i < size; i++) {
+        if (z[i] > max) {
+            max = z[i];
+        }
+    }
+    float sum = 0;
+    for (int i = 0; i < size; i++) {
+        sum += expf(z[i]-max);
+    }
+    float* buff = new float[size];
+    for (int i = 0; i < size; i++){
+        buff[i] = expf(z[i]-max) / sum;
+    }
+    return buff;
+}
+
+
+
 void setUpCNNFilters(float *host_cov_b, float * host_cov_filter) {
     gpuErrchk( cudaMemcpyToSymbol(device_cov1_b, host_cov_b, COV1_FILTER_OUT_CH*sizeof(float), 
         0, cudaMemcpyHostToDevice) );
@@ -636,6 +685,25 @@ int main( int argc, char *argv[])
     int out_col = INPUT_WIDTH, out_row = INPUT_HEIGHT;
     float *d_in[COV1_FILTER_OUT_CH]; 
     float *d_out[COV1_FILTER_OUT_CH];
+
+    // linear layers setup
+    // alloc memory host-side for weights and biases needed in linear layers
+    float *h_W1 = (float *) malloc (INPUT_SIZE1 * OUTPUT_SIZE1 * sizeof(float));
+    float *h_b1 = (float *) malloc (OUTPUT_SIZE1 * sizeof(float));
+    float *h_W2 = (float *) malloc (INPUT_SIZE2 * OUTPUT_SIZE2 * sizeof(float));
+    float *h_b2 = (float *) malloc (OUTPUT_SIZE2 * sizeof(float));
+    float *h_linear_out = (float *) malloc (OUTPUT_SIZE2 * sizeof(float)); // host output of linear layers
+    // pinning host memory
+    gpuErrchk(cudaHostRegister(h_W1, INPUT_SIZE1 * OUTPUT_SIZE1 * sizeof(float), 0));
+    gpuErrchk(cudaHostRegister(h_b1, OUTPUT_SIZE1 * sizeof(float), 0));
+    gpuErrchk(cudaHostRegister(h_W2, INPUT_SIZE2 * OUTPUT_SIZE2 * sizeof(float), 0));
+    gpuErrchk(cudaHostRegister(h_b2, OUTPUT_SIZE2 * sizeof(float), 0));
+    // init weights and biases
+    initWeights(h_W1, INPUT_SIZE1, OUTPUT_SIZE1);
+    initBias(h_b1, OUTPUT_SIZE1);
+    initWeights(h_W2, INPUT_SIZE2, OUTPUT_SIZE2);
+    initBias(h_b2, OUTPUT_SIZE2);
+    
 //================= Timing Begins ========================
     double start_time=getTimeStamp();
 
@@ -691,12 +759,45 @@ int main( int argc, char *argv[])
         gpuErrchk(cudaFree(d_in[ch]));
     }
 
+    // flatten third convolution layer output
     float *d_flattened;
     gpuErrchk( cudaMalloc( (void **) &d_flattened, COV3_FILTER_OUT_CH*out_col*out_row * sizeof(float) ) );
     for(int ch = 0; ch < COV3_FILTER_OUT_CH; ch++) {
         flatten<<<64, 1024>>>(d_out[ch], d_flattened, ch, out_row*out_col);
     }
     
+    // linear layers
+    // alloc weights and bias memory device side
+    float *d_W1;
+    float *d_b1;
+    float *d_W2;
+    float *d_b2;
+    float *d_linear_out1;
+    float *d_linear_out2;
+    gpuErrchk( cudaMalloc( (void **) &d_W1, INPUT_SIZE1 * OUTPUT_SIZE1 * sizeof(float) ) );
+    gpuErrchk( cudaMalloc( (void **) &d_b1, OUTPUT_SIZE1 * sizeof(float) ) );
+    gpuErrchk( cudaMalloc( (void **) &d_W2, INPUT_SIZE2 * OUTPUT_SIZE2 * sizeof(float) ) );
+    gpuErrchk( cudaMalloc( (void **) &d_b2, OUTPUT_SIZE2 * sizeof(float) ) );
+    gpuErrchk( cudaMalloc( (void **) &d_linear_out1, OUTPUT_SIZE1 * sizeof(float) ) );
+    gpuErrchk( cudaMalloc( (void **) &d_linear_out2, OUTPUT_SIZE2 * sizeof(float) ) );
+
+    // transfer weights and biases to device
+    gpuErrchk( cudaMemcpy(d_W1, h_W1, INPUT_SIZE1 * OUTPUT_SIZE1 * sizeof(float), cudaMemcpyHostToDevice) );
+    gpuErrchk( cudaMemcpy(d_b1, h_b1, OUTPUT_SIZE1 * sizeof(float), cudaMemcpyHostToDevice) );
+    gpuErrchk( cudaMemcpy(d_W2, h_W2, INPUT_SIZE2 * OUTPUT_SIZE2 * sizeof(float), cudaMemcpyHostToDevice) );
+    gpuErrchk( cudaMemcpy(d_b2, h_b2, OUTPUT_SIZE2 * sizeof(float), cudaMemcpyHostToDevice) );
+
+    // linear layer 1: input: d_flattened (1x22400) output: (1x256)
+    linear<<<64, 1024>>>(d_linear_out1, d_flattened, d_W1, d_b1, INPUT_SIZE1, OUTPUT_SIZE1, false);
+    // linear layer 2: input: d_linear_out1 (1x256) output: (1x3)
+    linear<<<64, 1024>>>(d_linear_out2, d_linear_out1, d_W2, d_b2, INPUT_SIZE2, OUTPUT_SIZE2, true);
+    gpuErrchk( cudaDeviceSynchronize() );
+
+    // copy data back
+    gpuErrchk( cudaMemcpy(h_linear_out, d_linear_out2, OUTPUT_SIZE2 * sizeof(float), cudaMemcpyDeviceToHost) );
+
+    // softmax on the output of second linear layer
+    h_linear_out = softmax(OUTPUT_SIZE2, h_linear_out);
 
     double end_time=getTimeStamp();
 //================= Timing Ends ========================    
@@ -719,19 +820,27 @@ int main( int argc, char *argv[])
 // #endif
 
 #ifdef PRINTDATA
+    // print flattened output
     int flattenedBytes = COV3_FILTER_OUT_CH*out_col*out_row*sizeof(float);
     float *h_flattened = (float *) malloc (flattenedBytes);
     gpuErrchk(cudaMemcpy(h_flattened, d_flattened, flattenedBytes, cudaMemcpyDeviceToHost));
-
     for (int i = 0; i < COV3_FILTER_OUT_CH; i++) {
+        printf("Output ch%d:\n", i);
         for (int j = 0; j < out_row; j++) {
             for (int k = 0; k < out_col; k++) {
                 printf("%f ", h_flattened[k + j*out_col + i*out_row*out_col]);
             }
             printf("\n");
         }
-        printf("\n");
     }    
+    printf("\n");
+
+    // print final output
+    printf("Softmax output:\n");
+    for (int j = 0; j < OUTPUT_SIZE2; j++) {
+        printf("%f ", h_linear_out[j]);
+    }
+    printf("\n");
 #endif
     
     for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
