@@ -81,3 +81,20 @@ void maxPoolOutSize(int in_rows, int in_cols, int &out_rows, int &out_cols) {
     out_rows = (in_rows - 1) / STRIDE + 1;
     out_cols = (in_cols - 1) / STRIDE + 1;
 }
+
+void initBias(float *A, int n) {
+    for (int i = 0; i < n; i++) {
+        // A[i] = rand() % 10;
+        A[i] = 1.0;
+    }
+}
+
+void initWeights(float *W, int inSize, int outSize) {
+    for (int i = 0; i < inSize; i++) {
+        for (int j = 0; j < outSize; j++) {
+            int offset = (i * outSize) + j;
+            // W[offset] = rand() % 10;
+            W[offset] = 1.0;
+        }
+    }
+}

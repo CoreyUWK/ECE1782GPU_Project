@@ -3,8 +3,8 @@
 #include <stdlib.h>
 #include <math.h>
 
-#define INPUT_SIZE 256
-#define OUTPUT_SIZE 3
+#define INPUT_SIZE 22400
+#define OUTPUT_SIZE 256
 
 /*You can use the following for any CUDA function that returns cudaError_t type*/
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
@@ -67,10 +67,10 @@ void host_FC(float *output, float *input, float *W, float *b, int inSize, int ou
     }
 }
 
-__constant__ float device_input[INPUT_SIZE];
-__constant__ float device_b[OUTPUT_SIZE];
-// __global__ void FC(float *output, float *input, float *W, float *b, int inSize, int outSize) {
-__global__ void FC(float *output, float *W, int inSize, int outSize) {
+// __constant__ float device_input[INPUT_SIZE];
+// __constant__ float device_b[OUTPUT_SIZE];
+__global__ void FC(float *output, float *input, float *W, float *b, int inSize, int outSize) {
+// __global__ void FC(float *output, float *W, int inSize, int outSize) {
     int j = blockDim.x * blockIdx.x + threadIdx.x;
 
     if ((j >= outSize)) {
@@ -80,12 +80,12 @@ __global__ void FC(float *output, float *W, int inSize, int outSize) {
     float sum = 0.0;
     for (int i = 0; i < inSize; i++) {
         int offset = i * outSize + j;
-        // sum += input[i] * W[offset];
-        sum += device_input[i] * W[offset];
+        sum += input[i] * W[offset];
+        // sum += device_input[i] * W[offset];
     }
 
-    // output[j] = sum + b[j];
-    output[j] = sum + device_b[j];
+    output[j] = sum + b[j];
+    // output[j] = sum + device_b[j];
 }
 
 int main() {
@@ -105,31 +105,31 @@ int main() {
     initArray(h_b, OUTPUT_SIZE);
 
     gpuErrchk(cudaDeviceReset());
-
-    double start_time = getTimeStamp();
     
     // alloc memory device side
-    // float *d_in;
+    float *d_in;
     float *d_W;
-    // float *d_b;
+    float *d_b;
     float *d_out;
-    // gpuErrchk( cudaMalloc( (void **) &d_in, INPUT_SIZE * sizeof(float) ) );
+    gpuErrchk( cudaMalloc( (void **) &d_in, INPUT_SIZE * sizeof(float) ) );
     gpuErrchk( cudaMalloc( (void **) &d_W, INPUT_SIZE * OUTPUT_SIZE * sizeof(float) ) );
-    // gpuErrchk( cudaMalloc( (void **) &d_b, OUTPUT_SIZE * sizeof(float) ) );
+    gpuErrchk( cudaMalloc( (void **) &d_b, OUTPUT_SIZE * sizeof(float) ) );
     gpuErrchk( cudaMalloc( (void **) &d_out, OUTPUT_SIZE * sizeof(float) ) );
 
     // transfer data to device
-    // gpuErrchk( cudaMemcpy(d_in, h_in, INPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice) );
+    gpuErrchk( cudaMemcpy(d_in, h_in, INPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice) );
     gpuErrchk( cudaMemcpy(d_W, h_W, INPUT_SIZE * OUTPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice) );
-    // gpuErrchk( cudaMemcpy(d_b, h_b, OUTPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice) );
-    gpuErrchk( cudaMemcpyToSymbol(device_input, h_in, INPUT_SIZE * sizeof(float)) );
-    gpuErrchk( cudaMemcpyToSymbol(device_b, h_b, OUTPUT_SIZE * sizeof(float)) );
+    gpuErrchk( cudaMemcpy(d_b, h_b, OUTPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice) );
+    // gpuErrchk( cudaMemcpyToSymbol(device_input, h_in, INPUT_SIZE * sizeof(float)) );
+    // gpuErrchk( cudaMemcpyToSymbol(device_b, h_b, OUTPUT_SIZE * sizeof(float)) );
+
+    double start_time = getTimeStamp();
 
 	// invoke kernel
     dim3 block(32, 32); // configure
     dim3 grid((OUTPUT_SIZE+block.x-1)/block.x, (INPUT_SIZE+block.y-1)/block.y);
-    // FC<<<grid, block>>>(d_out, d_in, d_W, d_b, INPUT_SIZE, OUTPUT_SIZE);
-    FC<<<grid, block>>>(d_out, d_W, INPUT_SIZE, OUTPUT_SIZE);
+    FC<<<64, 1024>>>(d_out, d_in, d_W, d_b, INPUT_SIZE, OUTPUT_SIZE);
+    // FC<<<grid, block>>>(d_out, d_W, INPUT_SIZE, OUTPUT_SIZE);
     gpuErrchk( cudaDeviceSynchronize() );
 
     // copy data back
@@ -164,9 +164,9 @@ int main() {
     cudaHostUnregister(h_b);
 
     // free gpu resources
-    // gpuErrchk( cudaFree(d_in) );
+    gpuErrchk( cudaFree(d_in) );
     gpuErrchk( cudaFree(d_W) );
-    // gpuErrchk( cudaFree(d_b) );
+    gpuErrchk( cudaFree(d_b) );
     gpuErrchk( cudaFree(d_out) );
     gpuErrchk( cudaDeviceReset() );
 
