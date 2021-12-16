@@ -9,6 +9,9 @@ $(OUT_FOLDER)/final.out: convolutionMulti.cu
 $(OUT_FOLDER)/max_pool_2d.out: test_max_pool_2d.cu
 	nvcc $^ -Xptxas="-v" --use_fast_math -o $@
 
+$(OUT_FOLDER)/relu.out: test_relu.cu
+	nvcc $^ -Xptxas="-v" --use_fast_math -o $@
+
 all: $(OUT_FOLDER)/final.out $(OUT_FOLDER)/max_pool_2d.out
 
 clean:
@@ -18,3 +21,4 @@ clean:
 test: $(OUT_FOLDER)/final.out
 	$(OUT_FOLDER)/final.out
 	$(OUT_FOLDER)/max_pool_2d.out 10 10
+	$(OUT_FOLDER)/relu.out 10 10

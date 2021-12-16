@@ -2,23 +2,8 @@
 #include <sys/time.h>
 #include <stdlib.h>
 #include <math.h>
+#include "../src/utils.cu"
 
-/*You can use the following for any CUDA function that returns cudaError_t type*/
-#define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
-inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
-{
-    if (code == cudaSuccess) return;
-
-    fprintf(stderr,"Error: %s %s %d\n", cudaGetErrorString(code), file, line);
-    if (abort) exit(code);
-}
-
-/*Use the following to get a timestamp*/
-double getTimeStamp() {
-    struct timeval tv;
-    gettimeofday( &tv, NULL );
-    return (double) tv.tv_usec/1000000 + tv.tv_sec;
-}
 
 void initData(float *M, int nRows, int nCols) {
     for (int i = 0; i < nRows; i++) {
