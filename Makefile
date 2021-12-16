@@ -13,7 +13,10 @@ $(OUT_FOLDER)/max_pool_2d.out: test_max_pool_2d.cu
 $(OUT_FOLDER)/relu.out: test_relu.cu
 	nvcc $^ $(MY_NVCC_FLAGS) -o $@
 
-all: $(OUT_FOLDER)/final.out $(OUT_FOLDER)/max_pool_2d.out $(OUT_FOLDER)/relu.out
+$(OUT_FOLDER)/linear.out: test_linear.cu
+	nvcc $^ $(MY_NVCC_FLAGS) -o $@
+
+all: $(OUT_FOLDER)/final.out $(OUT_FOLDER)/max_pool_2d.out $(OUT_FOLDER)/relu.out $(OUT_FOLDER)/linear.out
 
 clean:
 	rm $(OUT_FOLDER)/*
@@ -23,3 +26,4 @@ test: $(OUT_FOLDER)/final.out
 	$(OUT_FOLDER)/final.out
 	$(OUT_FOLDER)/max_pool_2d.out 10 10
 	$(OUT_FOLDER)/relu.out 10 10
+	$(OUT_FOLDER)/linear.out
