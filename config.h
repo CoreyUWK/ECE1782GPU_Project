@@ -1,6 +1,11 @@
 #ifndef CONFIG_KERNEL_H
 #define CONFIG_KERNEL_H
 
+#define PRINTDATA 1
+#define SHMEM 1
+//#define DebugSHMEM 1
+//#define DebugSHMEM_Data 1
+
 #define INPUT_WIDTH 100 // 2048//100
 #define INPUT_HEIGHT 56 // 2048//56
 
