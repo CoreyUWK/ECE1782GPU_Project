@@ -1,9 +1,11 @@
-/*You can use the following for any CUDA function that returns cudaError_t type*/
-#define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
-inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
-{
-    if (code == cudaSuccess) return;
+#include <stdio.h>
+#include <sys/time.h>
+#include "config.h"
+#include "utils.h"
 
+/*You can use the following for any CUDA function that returns cudaError_t type*/
+inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort){
+    if (code == cudaSuccess) return;
     fprintf(stderr,"Error: %s %s %d\n", cudaGetErrorString(code), file, line);
     if (abort) exit(code);
 }
