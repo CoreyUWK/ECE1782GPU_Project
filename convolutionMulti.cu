@@ -44,6 +44,7 @@ However, threads will not be indexed top left of convolution with filter
 //#include "cublas_v2.h"
 #include "config.h"
 #include "utils.cu"
+#include "layers/linear.cu"
 #include "layers/max_pool_2d.cu"
 
 #define PRINTDATA 1
@@ -429,27 +430,6 @@ __global__ void flatten(float *d_conv_out, float *d_flattened, int channel, int 
     d_flattened[offset+x] = d_conv_out[x];
 }
 
-__global__ void linear(float *output, float *input, float *W, float *b, int inSize, int outSize, bool isFinal) {
-    int j = blockDim.x * blockIdx.x + threadIdx.x;
-
-    if ((j >= outSize)) {
-        return;
-    }
-
-    float sum = 0.0;
-    for (int i = 0; i < inSize; i++) {
-        int offset = i * outSize + j;
-        sum += input[i] * W[offset];
-    }
-
-    // final linear layer don't use relu
-    if (isFinal) {
-        output[j] = sum + b[j];
-    }
-    else {
-        output[j] = relu(sum + b[j]);
-    }
-}
 
 float* softmax(int size, float* z)
 {
