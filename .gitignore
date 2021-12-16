@@ -1,2 +1,6 @@
-# ignore compiled binaries
-*.out
+*.i
+*.ii
+*.gpu
+*.ptx
+*.cubin
+*.fatbin

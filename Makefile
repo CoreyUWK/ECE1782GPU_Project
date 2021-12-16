@@ -1,11 +1,13 @@
-final.out:  convolutionMulti.cu utils.cu layers/*.cu layers/*.h
-	nvcc convolutionMulti.cu -Xptxas="-v" --use_fast_math -o final.out
+OUT_FOLDER := bin
 
-all: final.out
+$(OUT_FOLDER)/final.out:  convolutionMulti.cu utils.cu layers/*.cu layers/*.h
+	nvcc convolutionMulti.cu -Xptxas="-v" --use_fast_math -o $@
+
+all: $(OUT_FOLDER)/final.out
 
 clean:
-	rm final.out
+	rm $(OUT_FOLDER)/*
 
 .PHONY: test
-test: final.out
-	./final.out
+test: $(OUT_FOLDER)/final.out
+	$(OUT_FOLDER)/final.out
