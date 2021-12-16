@@ -39,27 +39,20 @@ However, threads will not be indexed top left of convolution with filter
 #include <vector>
 #include <mutex>
 #include <algorithm>
-#include "cnn_weights.cu"
 #include <cmath>
 //#include "cublas_v2.h"
+#include "cnn_weights.cu"
 #include "config.h"
 #include "utils.cu"
+#include "layers/flatten.cu"
 #include "layers/linear.cu"
 #include "layers/max_pool_2d.cu"
+#include "layers/softmax.cu"
 
 #define PRINTDATA 1
 #define SHMEM 1
 //#define DebugSHMEM 1
 //#define DebugSHMEM_Data 1
-
-#define INPUT_WIDTH 100//2048//100
-#define INPUT_HEIGHT 56//2048//56
-
-// Linear Config
-#define INPUT_SIZE1 22400
-#define OUTPUT_SIZE1 256
-#define INPUT_SIZE2 256
-#define OUTPUT_SIZE2 3
 
 
 // Currently a thread per pooling, but thread no reading coalesed
@@ -417,38 +410,6 @@ __global__ void device_CNN_Multi_v2(int in_cols, int in_rows, float *inCh, int f
         totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);*/
 /*#endif
 }*/
-
-__global__ void flatten(float *d_conv_out, float *d_flattened, int channel, int size) {
-    int x = blockDim.x * blockIdx.x + threadIdx.x;
-
-    if (x >= size) {
-        return;
-    }
-
-    int offset = channel*size;
-
-    d_flattened[offset+x] = d_conv_out[x];
-}
-
-
-float* softmax(int size, float* z)
-{
-    float max = 0;
-    for (int i = 0; i < size; i++) {
-        if (z[i] > max) {
-            max = z[i];
-        }
-    }
-    float sum = 0;
-    for (int i = 0; i < size; i++) {
-        sum += expf(z[i]-max);
-    }
-    float* buff = new float[size];
-    for (int i = 0; i < size; i++){
-        buff[i] = expf(z[i]-max) / sum;
-    }
-    return buff;
-}
 
 
 
