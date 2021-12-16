@@ -2,32 +2,15 @@
 #include <algorithm>
 #include <stdio.h>
 #include <sys/time.h>
+#include "../src/utils.cu"
+#include "../src/layers/max_pool_2d.cu"
 
 #define PAD_VALUE -INFINITY
 #define MAX_TOL 1e-3
 
-#define KX 3
-#define KY 3
-#define STRIDE 3
+// #define STRIDE 3
 
-#define DEBUG
-
-#define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
-inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
-{
-    if (code == cudaSuccess) return;
-
-    fprintf(stderr,"Error: %s %s %d\n", cudaGetErrorString(code), file, line);
-    if (abort) exit(code);
-}
-
-
-/*Use the following to get a timestamp*/
-double getTimeStamp() {
-        struct timeval tv;
-        gettimeofday( &tv, NULL );
-        return (double) tv.tv_usec/1000000 + tv.tv_sec;
-}
+// #define DEBUG
 
 
 void initData(float *M, int n_rows, int n_cols) {
@@ -55,20 +38,16 @@ void printMatrix(float *M, int n_rows, int n_cols) {
 
 void host_max_pool_2d(
         float *X,
-        float *Y,
         int in_rows,
         int in_cols,
-        int kx,  // kernel size
-        int ky,  // kernel size
-        int s  // stride
+        float *Y,
+        int out_rows,
+        int out_cols
     ) {
-    // padding=same
+    // padding=same from tensorflow
 
-    int out_rows = (in_rows - 1) / s + 1;
-    int out_cols = (in_cols - 1) / s + 1;
-
-    int px_pre = (in_cols % s == 0) ? max(kx - s, 0) : max(kx - in_cols % s, 0);
-    int py_pre = (in_rows % s == 0) ? max(ky - s, 0) : max(ky - in_rows % s, 0);
+    int px_pre = (in_cols % STRIDE == 0) ? max(POOL_SIZE - STRIDE, 0) : max(POOL_SIZE - in_cols % STRIDE, 0);
+    int py_pre = (in_rows % STRIDE == 0) ? max(POOL_SIZE - STRIDE, 0) : max(POOL_SIZE - in_rows % STRIDE, 0);
 
     px_pre /= 2;
     py_pre /= 2;
@@ -80,12 +59,12 @@ void host_max_pool_2d(
           float current_element;
           int addr;
 
-          int i_y_min = o_y * s - py_pre;
-          int i_x_min = o_x * s - px_pre;
+          int i_y_min = o_y * STRIDE - py_pre;
+          int i_x_min = o_x * STRIDE - px_pre;
 
           // input dimensions
-          for (int i_y = i_y_min; i_y < i_y_min + ky; i_y++) {
-              for (int i_x = i_x_min; i_x < i_x_min + kx; i_x++) {
+          for (int i_y = i_y_min; i_y < i_y_min + POOL_SIZE; i_y++) {
+              for (int i_x = i_x_min; i_x < i_x_min + POOL_SIZE; i_x++) {
 
                   addr = i_y * in_cols + i_x;
 
@@ -103,56 +82,6 @@ void host_max_pool_2d(
     }
 }
 
-
-__global__ void max_pool_2d(
-        float *X,
-        float *Y,
-        int in_rows,
-        int in_cols,
-        int kx,
-        int ky,
-        int s
-    ) {
-    unsigned int o_col = blockDim.x * blockIdx.x + threadIdx.x;
-    unsigned int o_row = blockDim.y * blockIdx.y + threadIdx.y;
-
-    float out_element = PAD_VALUE;
-    float current_element;
-    unsigned int addr;
-
-    int out_rows = (in_rows - 1) / s + 1;
-    int out_cols = (in_cols - 1) / s + 1;
-
-    if ((o_col >= out_cols) || (o_row >= out_rows)) {
-        return;
-    }
-
-    // Implement padding=same from tensorflow
-    int px_pre = (in_cols % s == 0) ? max(kx - s, 0) : max(kx - in_cols % s, 0);
-    int py_pre = (in_rows % s == 0) ? max(ky - s, 0) : max(ky - in_rows % s, 0);
-    px_pre /= 2;
-    py_pre /= 2;
-
-    int i_y_min = o_row * s - py_pre;
-    int i_x_min = o_col * s - px_pre;
-
-
-    for (int i_col = i_x_min; i_col < i_x_min + kx; i_col++) {
-        for (int i_row = i_y_min; i_row < i_y_min + ky; i_row++) {
-            addr = i_row * in_cols + i_col;
-
-            current_element = (
-                i_col >= 0 && i_col < in_cols && i_row >= 0 && i_row < in_rows
-            ) ? X[addr] : PAD_VALUE;
-
-            if (current_element > out_element)
-                out_element = current_element;
-        }
-    }
-
-    addr = o_row * out_cols + o_col;
-    Y[addr] = out_element;
-}
 
 int main(int argc, char *argv[]) {
     if (argc != 3) {
@@ -206,14 +135,14 @@ int main(int argc, char *argv[]) {
     dim3 grid(
             (out_cols + block.x - 1) / block.x,
             (out_rows + block.y - 1) / block.y);
-    max_pool_2d<<<grid, block>>>(d_X, d_Y, in_rows, in_cols, KX, KY, STRIDE);
+    max_pool_2d<<<grid, block>>>(d_X, in_rows, in_cols, d_Y, out_rows, out_cols);
 
     gpuErrchk(cudaMemcpy(h_dY, d_Y, out_bytes, cudaMemcpyDeviceToHost));
 
     double end_time = getTimeStamp();
     int total_time_ms = (int) ceil((end_time - start_time) * 1000);
 
-    host_max_pool_2d(h_X, h_hY, in_rows, in_cols, KX, KY, STRIDE);
+    host_max_pool_2d(h_X, in_rows, in_cols, h_hY, out_rows, out_cols);
 
 #ifdef DEBUG
     printf("Y:\n");
