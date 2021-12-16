@@ -37,8 +37,8 @@ However, threads will not be indexed top left of convolution with filter
 #include <vector>
 #include <mutex>
 #include <algorithm>
-#include "cnn_weights.cu"
-#include "utils.cu"
+#include "../src/cnn_weights.h"
+#include "../src/utils.cu"
 
 //#define PRINTDATA 1
 //#define EnableLock 1
@@ -235,7 +235,7 @@ void layer_cov(int in_cols, int in_rows, cudaStream_t *streams, cudaEvent_t &eve
         }
         // Every stream needs to wait for input
         if (i > 0 && i < 64) // input cpy and first filter run on same stream so skip on first stream 
-            gpuErrchk(cudaStreamWaitEvent(streams[i], event));
+            gpuErrchk(cudaStreamWaitEvent(streams[i], event, 0));
 
         // Setup all filters and b
         setupFilterCh(i, &host_cov1_b[i], &host_cov1_filter[0][i][0][0], streams[i]);
@@ -305,7 +305,7 @@ void layer_covMulti(int in_cols, int in_rows, cudaStream_t *streams, cudaEvent_t
 
         for (int outCh=0; outCh < COV2_FILTER_OUT_CH; ++outCh) {
             // Every stream needs to wait for input
-            gpuErrchk(cudaStreamWaitEvent(streams[COV2_FILTER_IN_CH + outCh], events[inCh]));
+            gpuErrchk(cudaStreamWaitEvent(streams[COV2_FILTER_IN_CH + outCh], events[inCh], 0));
 
             // Setup all filters and b
             setupFilterCh(outCh, &host_cov1_b[outCh], &host_cov1_filter[0][outCh][0][0], streams[COV2_FILTER_IN_CH+outCh]);
