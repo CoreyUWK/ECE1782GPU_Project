@@ -41,14 +41,14 @@ However, threads will not be indexed top left of convolution with filter
 #include <algorithm>
 #include <cmath>
 //#include "cublas_v2.h"
-#include "cnn_weights.h"
-#include "config.h"
-#include "utils.cu"
-#include "layers/conv_2d.cu"
-#include "layers/flatten.cu"
-#include "layers/linear.cu"
-#include "layers/max_pool_2d.cu"
-#include "layers/softmax.cu"
+#include "../src/cnn_weights.h"
+#include "../src/config.h"
+#include "../src/utils.cu"
+#include "../src/layers/conv_2d.cu"
+#include "../src/layers/flatten.cu"
+#include "../src/layers/linear.cu"
+#include "../src/layers/max_pool_2d.cu"
+#include "../src/layers/softmax.cu"
 
 
 // Currently a thread per pooling, but thread no reading coalesed
