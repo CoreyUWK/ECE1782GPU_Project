@@ -23,18 +23,6 @@ double getTimeStamp() {
 
 __device__ float relu(float val) { return fmaxf(0.0, val); }
 
-float *allocHostBlock(int bytes) {
-    float *mem = NULL;
-    mem = (float *)malloc(bytes);
-    return mem;
-}
-
-float *allocDeviceBlock(int bytes) {
-    float *mem = NULL;
-    gpuErrchk(cudaMalloc((void **)&mem, bytes));
-    return mem;
-}
-
 void getConvPadding(int filterSize, int &totalPaddingHeight,
                     int &totalPaddingWidth, int &topPadding, int &leftPadding,
                     int &bottomPadding, int &rightPadding) {

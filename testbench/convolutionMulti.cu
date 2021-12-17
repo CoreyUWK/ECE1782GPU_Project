@@ -46,6 +46,7 @@ then write out to ouput (inline or not)
 #include <sys/time.h>
 #include <vector>
 //#include "cublas_v2.h"
+#include "../src/alloc_helpers.cu"
 #include "../src/cnn_weights.h"
 #include "../src/config.h"
 #include "../src/layers/conv_2d.cu"

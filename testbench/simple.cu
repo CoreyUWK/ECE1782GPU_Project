@@ -35,6 +35,7 @@ it, and then sync and write out to original input
 then write out to ouput (inline or not)
 
 */
+#include "../src/alloc_helpers.cu"
 #include "../src/cnn_weights.h"
 #include "../src/utils.cu"
 #include <algorithm>
@@ -430,48 +431,6 @@ __global__ void kernel(float *inCh, float *outCh, float b, float *filter,
     device_CNN(inCh, outCh, b, filter, filterSize, totalPaddingHeight,
                totalPaddingWidth, topPadding, leftPadding);
 #endif
-}
-
-float *allocHostBlockHelper(std::vector<float *> &h_freeBlocks,
-                            std::mutex &h_freeBlocksMutex, int bytes) {
-    float *mem = NULL;
-
-#ifdef EnableLock
-    h_freeBlocksMutex.lock();
-#endif
-    if (!h_freeBlocks.empty()) {
-        mem = h_freeBlocks.back();
-        h_freeBlocks.pop_back();
-    }
-#ifdef EnableLock
-    h_freeBlocksMutex.unlock();
-#endif
-    if (mem == NULL) {
-        mem = allocHostBlock(bytes);
-    }
-
-    return mem;
-}
-
-float *allocDeviceBlockHelper(std::vector<float *> &d_freeBlocks,
-                              std::mutex &d_freeBlocksMutex, int bytes) {
-    float *mem = NULL;
-
-#ifdef EnableLock
-    d_freeBlocksMutex.lock();
-#endif
-    if (!d_freeBlocks.empty()) {
-        mem = d_freeBlocks.back();
-        d_freeBlocks.pop_back();
-    }
-#ifdef EnableLock
-    d_freeBlocksMutex.unlock();
-#endif
-    if (mem == NULL) {
-        mem = allocDeviceBlock(bytes);
-    }
-
-    return mem;
 }
 
 void setUpCNNFilters(float *host_cov_b, float *host_cov_filter,
