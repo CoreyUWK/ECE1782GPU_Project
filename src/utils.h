@@ -4,7 +4,7 @@
 /*You can use the following for any CUDA function that returns cudaError_t
  * type*/
 #define gpuErrchk(ans)                                                         \
-  { gpuAssert((ans), __FILE__, __LINE__); }
+    { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line,
                       bool abort = true);
 

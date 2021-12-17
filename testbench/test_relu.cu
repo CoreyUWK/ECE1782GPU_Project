@@ -1,15 +1,14 @@
-#include <stdio.h>
-#include <sys/time.h>
-#include <stdlib.h>
-#include <math.h>
 #include "../src/utils.cu"
-
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/time.h>
 
 void initData(float *M, int nRows, int nCols) {
     for (int i = 0; i < nRows; i++) {
         for (int j = 0; j < nCols; j++) {
             int offset = (i * nCols) + j;
-            M[offset] = (i+j) % 2 == 0 ? -(i+j) : (i+j);
+            M[offset] = (i + j) % 2 == 0 ? -(i + j) : (i + j);
         }
     }
 }
@@ -18,7 +17,7 @@ void printMatrix(float *M, int nRows, int nCols) {
     for (int i = 0; i < nRows; i++) {
         for (int j = 0; j < nCols; j++) {
             int offset = i * nCols + j;
-            printf("%d,%d:%f   ", i,j, M[offset]);
+            printf("%d,%d:%f   ", i, j, M[offset]);
         }
         printf("\n");
     }
@@ -43,14 +42,16 @@ __global__ void relu(float *X, int nRows, int nCols) {
 
     int offset = row * nCols + col;
 
-    X[offset] = fmaxf(0.0, X[offset]);;
+    X[offset] = fmaxf(0.0, X[offset]);
+    ;
 }
 
-int main( int argc, char *argv[] ) {
+int main(int argc, char *argv[]) {
 
     if (argc != 3) {
-       printf( "Please pass 2 arguments to the program: the first being the number of rows and the second being the number of columns.\n" ); 
-       return -1;
+        printf("Please pass 2 arguments to the program: the first being the "
+               "number of rows and the second being the number of columns.\n");
+        return -1;
     }
 
     // set matrix size
@@ -61,9 +62,9 @@ int main( int argc, char *argv[] ) {
     int bytes = nElements * sizeof(float);
 
     // alloc memory host-side
-    float *h_X = (float *) malloc (bytes);
-    float *h_dX = (float *) malloc (bytes);
-    float *h_hX = (float *) malloc (bytes); // host result
+    float *h_X = (float *)malloc(bytes);
+    float *h_dX = (float *)malloc(bytes);
+    float *h_hX = (float *)malloc(bytes); // host result
 
     cudaHostRegister(h_X, bytes, 0);
     cudaHostRegister(h_dX, bytes, 0);
@@ -77,25 +78,25 @@ int main( int argc, char *argv[] ) {
     gpuErrchk(cudaDeviceReset());
 
     double start_time = getTimeStamp();
-    
+
     // alloc memory device side
     float *d_X;
-    gpuErrchk( cudaMalloc( (void **) &d_X, bytes ) );
+    gpuErrchk(cudaMalloc((void **)&d_X, bytes));
 
-	// transfer data to device
-    gpuErrchk( cudaMemcpy(d_X, h_X, bytes, cudaMemcpyHostToDevice) );
+    // transfer data to device
+    gpuErrchk(cudaMemcpy(d_X, h_X, bytes, cudaMemcpyHostToDevice));
 
-	// invoke kernel
+    // invoke kernel
     dim3 block(32, 32); // configure
-    dim3 grid((nCols+block.x-1)/block.x, (nRows+block.y-1)/block.y);
+    dim3 grid((nCols + block.x - 1) / block.x, (nRows + block.y - 1) / block.y);
     relu<<<grid, block>>>(d_X, nRows, nCols);
-    gpuErrchk( cudaDeviceSynchronize() );
+    gpuErrchk(cudaDeviceSynchronize());
 
     // copy data back
-    gpuErrchk( cudaMemcpy(h_dX, d_X, bytes, cudaMemcpyDeviceToHost) );
+    gpuErrchk(cudaMemcpy(h_dX, d_X, bytes, cudaMemcpyDeviceToHost));
 
     double end_time = getTimeStamp();
-    int total_time_ms = (int) ceil ((end_time-start_time)*1000);
+    int total_time_ms = (int)ceil((end_time - start_time) * 1000);
 
     // check result
     host_relu(h_X, h_hX, nRows, nCols);
@@ -104,7 +105,8 @@ int main( int argc, char *argv[] ) {
     // printMatrix(h_dX, nRows, nCols);
     for (int i = 0; i < nElements; i++) {
         if (h_hX[i] != h_dX[i]) {
-            printf("Error: CPU result and GPU result mismatch at offset: %d.\n", i);
+            printf("Error: CPU result and GPU result mismatch at offset: %d.\n",
+                   i);
             return 0;
         }
     }
@@ -115,8 +117,8 @@ int main( int argc, char *argv[] ) {
     cudaHostUnregister(h_dX);
 
     // free gpu resources
-    gpuErrchk( cudaFree(d_X) );
-    gpuErrchk( cudaDeviceReset() );
+    gpuErrchk(cudaFree(d_X));
+    gpuErrchk(cudaDeviceReset());
 
-	return 0;
+    return 0;
 }

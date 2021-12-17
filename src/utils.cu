@@ -1,41 +1,43 @@
-#include <stdio.h>
-#include <sys/time.h>
 #include "config.h"
 #include "utils.h"
+#include <stdio.h>
+#include <sys/time.h>
 
-/*You can use the following for any CUDA function that returns cudaError_t type*/
-inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort){
-    if (code == cudaSuccess) return;
-    fprintf(stderr,"Error: %s %s %d\n", cudaGetErrorString(code), file, line);
-    if (abort) exit(code);
+/*You can use the following for any CUDA function that returns cudaError_t
+ * type*/
+inline void gpuAssert(cudaError_t code, const char *file, int line,
+                      bool abort) {
+    if (code == cudaSuccess)
+        return;
+    fprintf(stderr, "Error: %s %s %d\n", cudaGetErrorString(code), file, line);
+    if (abort)
+        exit(code);
 }
 
 /*Use the following to get a timestamp*/
 double getTimeStamp() {
-        struct timeval tv;
-        gettimeofday( &tv, NULL );
-        return (double) tv.tv_usec/1000000 + tv.tv_sec;
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_usec / 1000000 + tv.tv_sec;
 }
 
-__device__ float relu(float val) {
-    return fmaxf(0.0, val);
-}
+__device__ float relu(float val) { return fmaxf(0.0, val); }
 
-float* allocHostBlock(int bytes) {
+float *allocHostBlock(int bytes) {
     float *mem = NULL;
     mem = (float *)malloc(bytes);
     return mem;
 }
 
-float* allocDeviceBlock(int bytes) {
+float *allocDeviceBlock(int bytes) {
     float *mem = NULL;
     gpuErrchk(cudaMalloc((void **)&mem, bytes));
     return mem;
 }
 
-void getConvPadding(int filterSize, int &totalPaddingHeight, 
-    int &totalPaddingWidth, int &topPadding, int &leftPadding,
-    int &bottomPadding, int &rightPadding) {
+void getConvPadding(int filterSize, int &totalPaddingHeight,
+                    int &totalPaddingWidth, int &topPadding, int &leftPadding,
+                    int &bottomPadding, int &rightPadding) {
 
     totalPaddingHeight = filterSize - 1;
     totalPaddingWidth = filterSize - 1;
@@ -58,7 +60,7 @@ void initData(float *in, int width, int height, int padding, float *value) {
 }
 
 void Print2D(float *m, int width, int height) {
-    for (int i = 0, row=0; i < height; ++i, row += width) { // Row
+    for (int i = 0, row = 0; i < height; ++i, row += width) { // Row
         printf("%d:\t", i);
         for (int j = 0; j < width; ++j) { // Col
             printf("%.6f\t", m[row + j]);

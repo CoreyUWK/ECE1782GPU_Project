@@ -30,7 +30,8 @@ __device__ void device_CNN_inline(float *inCh, float *filter, int filterSize) {
             int offset = cnnOffset + i * INPUT_WIDTH + j;
             if (x - leftPadding + j < 0) continue;
             if (x - leftPadding + j >= INPUT_WIDTH) break;
-            conv += inCh[cnnOffset + i * INPUT_WIDTH + j] * filter[i * filterSize + j];
+            conv += inCh[cnnOffset + i * INPUT_WIDTH + j] * filter[i *
+filterSize + j];
             //printf("%d %d\n", i, j);
         }
     }

@@ -1,6 +1,7 @@
 #include "../utils.h"
 
-__global__ void linear(float *output, float *input, float *W, float *b, int inSize, int outSize, bool isFinal) {
+__global__ void linear(float *output, float *input, float *W, float *b,
+                       int inSize, int outSize, bool isFinal) {
     int j = blockDim.x * blockIdx.x + threadIdx.x;
 
     if ((j >= outSize)) {
@@ -16,8 +17,7 @@ __global__ void linear(float *output, float *input, float *W, float *b, int inSi
     // final linear layer don't use relu
     if (isFinal) {
         output[j] = sum + b[j];
-    }
-    else {
+    } else {
         output[j] = relu(sum + b[j]);
     }
 }

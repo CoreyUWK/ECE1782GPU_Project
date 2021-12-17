@@ -1,6 +1,7 @@
 #include "../config.h"
 
-__global__ void max_pool_2d(float *in, int in_rows, int in_cols, float *out, int out_rows, int out_cols) {
+__global__ void max_pool_2d(float *in, int in_rows, int in_cols, float *out,
+                            int out_rows, int out_cols) {
     unsigned int o_col = blockDim.x * blockIdx.x + threadIdx.x;
     unsigned int o_row = blockDim.y * blockIdx.y + threadIdx.y;
 
@@ -13,8 +14,10 @@ __global__ void max_pool_2d(float *in, int in_rows, int in_cols, float *out, int
     }
 
     // Implement padding=same from tensorflow
-    int px_pre = (in_cols % STRIDE == 0) ? max(POOL_SIZE - STRIDE, 0) : max(POOL_SIZE - in_cols % STRIDE, 0);
-    int py_pre = (in_rows % STRIDE == 0) ? max(POOL_SIZE - STRIDE, 0) : max(POOL_SIZE - in_rows % STRIDE, 0);
+    int px_pre = (in_cols % STRIDE == 0) ? max(POOL_SIZE - STRIDE, 0)
+                                         : max(POOL_SIZE - in_cols % STRIDE, 0);
+    int py_pre = (in_rows % STRIDE == 0) ? max(POOL_SIZE - STRIDE, 0)
+                                         : max(POOL_SIZE - in_rows % STRIDE, 0);
     px_pre /= 2;
     py_pre /= 2;
 
@@ -25,9 +28,10 @@ __global__ void max_pool_2d(float *in, int in_rows, int in_cols, float *out, int
         for (int i_row = i_y_min; i_row < i_y_min + POOL_SIZE; i_row++) {
             addr = i_row * in_cols + i_col;
 
-            current_element = (
-                i_col >= 0 && i_col < in_cols && i_row >= 0 && i_row < in_rows
-            ) ? in[addr] : PAD_VALUE;
+            current_element =
+                (i_col >= 0 && i_col < in_cols && i_row >= 0 && i_row < in_rows)
+                    ? in[addr]
+                    : PAD_VALUE;
 
             if (current_element > out_element)
                 out_element = current_element;
