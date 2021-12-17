@@ -57,8 +57,6 @@ void Print2D(float *m, int width, int height) {
     }
 }
 
-#define POOL_SIZE 2
-#define STRIDE POOL_SIZE
 void maxPoolOutSize(int in_rows, int in_cols, int &out_rows, int &out_cols) {
     out_rows = (in_rows - 1) / STRIDE + 1;
     out_cols = (in_cols - 1) / STRIDE + 1;
