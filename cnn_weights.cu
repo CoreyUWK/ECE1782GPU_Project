@@ -38,18 +38,8 @@ float host_cov1_filter[COV1_FILTER_IN_CH][COV1_FILTER_OUT_CH][COV1_FILTER_N][COV
     {1, 2, 3, 4, 5, 6, 7, 8}*/
 };
 
-float host_cov2_filter[COV2_FILTER_IN_CH][COV2_FILTER_OUT_CH][COV2_FILTER_N][COV2_FILTER_N] = {
-    { 
-        { {1, 1}, {1, 1} }
-    }
-    
-    /*{1, 2, 3, 4, 5, 6, 7, 8},
-    {1, 2, 3, 4, 5, 6, 7, 8},
-    {1, 2, 3, 4, 5, 6, 7, 8},
-    {1, 2, 3, 4, 5, 6, 7, 8},
-    {1, 2, 3, 4, 5, 6, 7, 8},
-    {1, 2, 3, 4, 5, 6, 7, 8},
-    {1, 2, 3, 4, 5, 6, 7, 8},
-    {1, 2, 3, 4, 5, 6, 7, 8}*/
-};
+float host_cov2_b[COV1_FILTER_OUT_CH];
+float host_cov2_filter[COV2_FILTER_IN_CH][COV2_FILTER_OUT_CH][COV2_FILTER_N][COV2_FILTER_N];
 
+float host_cov3_b[COV1_FILTER_OUT_CH];
+float host_cov3_filter[COV3_FILTER_IN_CH][COV3_FILTER_OUT_CH][COV3_FILTER_N][COV3_FILTER_N];
