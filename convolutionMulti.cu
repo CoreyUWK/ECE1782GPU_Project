@@ -72,7 +72,7 @@ However, threads will not be indexed top left of convolution with filter
 // Currently a thread per pooling, but thread no reading coalesed
 // could read coalesed by copying to shared memory and then reorder in shared memory linearly
 __global__ void max_pool_2d(float *in, int in_rows, int in_cols, float *out, int out_rows, int out_cols,
-    int px_pre, int py_pre) {
+        int px_pre, int py_pre) {
     unsigned int o_col = blockDim.x * blockIdx.x + threadIdx.x;
     unsigned int o_row = blockDim.y * blockIdx.y + threadIdx.y;
 
@@ -744,8 +744,9 @@ void layer2_cov_multi(int outChSize, int filterSize, int in_cols, int in_rows, f
     // Setup bias values and only 1 per output channel in total
     setUpCNNFilters(host_cov_b, NULL);
     int totalFilterSize = filterSize*filterSize;
+    int totalInChSize = totalFilterSize * outChSize;
     float * chOffset=host_cov_filter;
-    for (int ch=0; ch < outChSize; ++ch, chOffset += outChSize*totalFilterSize) {
+    for (int ch=0; ch < outChSize; ++ch, chOffset += totalInChSize) {
         // Setup all filters
         setUpCNNFilters(NULL, chOffset);
 

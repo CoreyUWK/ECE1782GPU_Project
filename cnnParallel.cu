@@ -38,7 +38,6 @@ However, threads will not be indexed top left of convolution with filter
 #include <mutex>
 #include <algorithm>
 #include "cnn_weights.cu"
-#include "utils.cu"
 
 //#define PRINTDATA 1
 //#define EnableLock 1
@@ -47,8 +46,8 @@ However, threads will not be indexed top left of convolution with filter
 //#define DebugSHMEM 1
 //#define DebugSHMEM_Data 1
 
-#define INPUT_WIDTH 100//2048//100
-#define INPUT_HEIGHT 56//2048//56
+#define INPUT_WIDTH 100//2048
+#define INPUT_HEIGHT 56//2048
 
 #define NUM_STREAM 64+64
 
@@ -56,11 +55,25 @@ However, threads will not be indexed top left of convolution with filter
 #define PAD_VALUE -INFINITY
 #define MAX_TOL 1e-3
 #define POOL_SIZE 2
-#define STRIDE POOL_SIZE
+#define STRIDE POOL_SIZE // 1
+
+// Linear Config
+#define ENABLE_LINEAR_LAYER 1
+#if STRIDE == POOL_SIZE
+#define INPUT_SIZE1 22400 // 64x(14x25)
+#else // STRIDE == 1
+#define INPUT_SIZE1 358400 // 64x(56x100)
+#endif
+#define OUTPUT_SIZE1 256
+#define INPUT_SIZE2 256
+#define OUTPUT_SIZE2 3
+
+#include "utils.cu"
 
 // Currently a thread per pooling, but thread no reading coalesed
 // could read coalesed by copying to shared memory and then reorder in shared memory linearly
-__global__ void max_pool_2d(float *in, int in_rows, int in_cols, float *out, int out_rows, int out_cols) {
+__global__ void max_pool_2d(float *in, int in_rows, int in_cols, float *out, int out_rows, int out_cols,
+        int px_pre, int py_pre) {
     unsigned int o_col = blockDim.x * blockIdx.x + threadIdx.x;
     unsigned int o_row = blockDim.y * blockIdx.y + threadIdx.y;
 
@@ -71,12 +84,6 @@ __global__ void max_pool_2d(float *in, int in_rows, int in_cols, float *out, int
     if (o_col >= out_cols || o_row >= out_rows) {
         return;
     }
-
-    // Implement padding=same from tensorflow
-    int px_pre = (in_cols % STRIDE == 0) ? max(POOL_SIZE - STRIDE, 0) : max(POOL_SIZE - in_cols % STRIDE, 0);
-    int py_pre = (in_rows % STRIDE == 0) ? max(POOL_SIZE - STRIDE, 0) : max(POOL_SIZE - in_rows % STRIDE, 0);
-    px_pre /= 2;
-    py_pre /= 2;
 
     int i_y_min = o_row * STRIDE - py_pre;
     int i_x_min = o_col * STRIDE - px_pre;
@@ -98,6 +105,58 @@ __global__ void max_pool_2d(float *in, int in_rows, int in_cols, float *out, int
     out[addr] = out_element;
 }
 
+__global__ void flatten(float *d_conv_out, float *d_flattened, int channel, int size) {
+    int x = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (x >= size) {
+        return;
+    }
+
+    int offset = channel*size;
+
+    d_flattened[offset+x] = d_conv_out[x];
+}
+
+__global__ void linear(float *output, float *input, float *W, float *b, int inSize, int outSize, bool isFinal) {
+    int j = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if ((j >= outSize)) {
+        return;
+    }
+
+    float sum = 0.0;
+    for (int i = 0; i < inSize; i++) {
+        int offset = i * outSize + j;
+        sum += input[i] * W[offset];
+    }
+
+    // final linear layer don't use relu
+    if (isFinal) {
+        output[j] = sum + b[j];
+    }
+    else {
+        output[j] = relu(sum + b[j]);
+    }
+}
+
+float* softmax(int size, float* z)
+{
+    float max = 0;
+    for (int i = 0; i < size; i++) {
+        if (z[i] > max) {
+            max = z[i];
+        }
+    }
+    float sum = 0;
+    for (int i = 0; i < size; i++) {
+        sum += expf(z[i]-max);
+    }
+    float* buff = new float[size];
+    for (int i = 0; i < size; i++){
+        buff[i] = expf(z[i]-max) / sum;
+    }
+    return buff;
+}
 
 __global__ void device_CNN(int in_cols, int in_rows, float *inCh, float *outCh, float b, float *filter, int filterSize,
     bool isSingle, bool isFirst, bool isLast,
@@ -197,12 +256,16 @@ void setUpCNNFilters(float *host_cov_b, float * host_cov_filter, cudaStream_t st
 
 void setupFilterCh(int ch, float *host_cov_b, float *host_cov_filter, cudaStream_t &stream) {
     int size = sizeof(float);
-    /*gpuErrchk( cudaMemcpyToSymbolAsync(device_cov1_b, host_cov_b, size, 
-        ch*size, cudaMemcpyHostToDevice, stream) );*/
+    if (NULL != host_cov_b) {
+        gpuErrchk( cudaMemcpyToSymbolAsync(device_cov1_b, host_cov_b, size, 
+            ch*size, cudaMemcpyHostToDevice, stream) );
+    }
 
-    size = COV1_FILTER_N*COV1_FILTER_N*sizeof(float);
-    gpuErrchk( cudaMemcpyToSymbolAsync(device_cov1_filter, host_cov_filter, size, 
-        ch * size, cudaMemcpyHostToDevice, stream) );
+    if (NULL != host_cov_filter) {
+        size = COV1_FILTER_N*COV1_FILTER_N*sizeof(float);
+        gpuErrchk( cudaMemcpyToSymbolAsync(device_cov1_filter, host_cov_filter, size, 
+            ch * size, cudaMemcpyHostToDevice, stream) );
+    }
 }
 
 void layer_cov(int in_cols, int in_rows, cudaStream_t *streams, cudaEvent_t &event,
@@ -234,11 +297,11 @@ void layer_cov(int in_cols, int in_rows, cudaStream_t *streams, cudaEvent_t &eve
             gpuErrchk(cudaEventRecord(event, streams[0]));
         }
         // Every stream needs to wait for input
-        if (i > 0 && i < 64) // input cpy and first filter run on same stream so skip on first stream 
+        if (i > 0) // input cpy and first filter run on same stream so skip on first stream 
             gpuErrchk(cudaStreamWaitEvent(streams[i], event));
 
         // Setup all filters and b
-        setupFilterCh(i, &host_cov1_b[i], &host_cov1_filter[0][i][0][0], streams[i]);
+        setupFilterCh(i, NULL, &host_cov1_filter[0][i][0][0], streams[i]);
 
         // Get output memory
         if (d_output[i] == NULL) {
@@ -268,10 +331,17 @@ void layer_maxPool(int in_cols, int in_rows, float **d_input,
     dim3 grid( (out_cols + block.x-1) / block.x, 
                (out_rows + block.y-1) / block.y);
 
+    // Implement padding=same from tensorflow
+    int px_pre = (in_cols % STRIDE == 0) ? max(POOL_SIZE - STRIDE, 0) : max(POOL_SIZE - (in_cols % STRIDE), 0);
+    int py_pre = (in_rows % STRIDE == 0) ? max(POOL_SIZE - STRIDE, 0) : max(POOL_SIZE - (in_rows % STRIDE), 0);
+    px_pre /= 2;
+    py_pre /= 2;
+
     // Get output memory
     for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
         gpuErrchk(cudaMalloc((void **)&d_output[ch], out_bytes));
-        max_pool_2d<<<grid, block, 0, streams[ch]>>>(d_input[ch], in_rows, in_cols, d_output[ch], out_rows, out_cols);
+        max_pool_2d<<<grid, block, 0, streams[ch]>>>(d_input[ch], in_rows, in_cols, d_output[ch], out_rows, out_cols,
+            px_pre, py_pre);
     }
 
     //gpuErrchk(cudaDeviceSynchronize());
@@ -282,7 +352,8 @@ void layer_maxPool(int in_cols, int in_rows, float **d_input,
 }
 
 void layer_covMulti(int in_cols, int in_rows, cudaStream_t *streams, cudaEvent_t *events,
-    float **d_input, float **d_output, int filterSize) {
+    float **d_input, float **d_output, int filterSize, 
+    float * host_cov_filter, float *host_cov_b) {
 
     int bytes = in_cols*in_rows*sizeof(float);
 
@@ -300,21 +371,25 @@ void layer_covMulti(int in_cols, int in_rows, cudaStream_t *streams, cudaEvent_t
     float *filterAddr;
     gpuErrchk(cudaGetSymbolAddress((void**)&filterAddr, device_cov1_filter));
 
+    float *host_filterAddr = host_cov_filter;
+    int totalFilterSize = filterSize*filterSize; 
+    int totalInChSize = totalFilterSize * COV2_FILTER_OUT_CH;
     for (int inCh=0; inCh < COV2_FILTER_IN_CH; ++inCh) {
         gpuErrchk(cudaEventRecord(events[inCh], streams[inCh]));
 
-        for (int outCh=0; outCh < COV2_FILTER_OUT_CH; ++outCh) {
+        for (int outCh=0; outCh < COV2_FILTER_OUT_CH; ++outCh, host_filterAddr += totalFilterSize) {
             // Every stream needs to wait for input
             gpuErrchk(cudaStreamWaitEvent(streams[COV2_FILTER_IN_CH + outCh], events[inCh]));
 
             // Setup all filters and b
-            setupFilterCh(outCh, &host_cov1_b[outCh], &host_cov1_filter[0][outCh][0][0], streams[COV2_FILTER_IN_CH+outCh]);
+            setupFilterCh(outCh, NULL, host_filterAddr, streams[COV2_FILTER_IN_CH+outCh]);
 
             // Get output memory
             if (inCh == 0) {
                 gpuErrchk(cudaMalloc((void **)&d_output[outCh], bytes));
             }
-            device_CNN<<<grid, block, 0, streams[COV2_FILTER_IN_CH + outCh]>>>(in_cols, in_rows, d_input[inCh], d_output[outCh], host_cov1_b[outCh], filterAddr + outCh*COV1_FILTER_N*COV1_FILTER_N, filterSize,
+            device_CNN<<<grid, block, 0, streams[COV2_FILTER_IN_CH + outCh]>>>(in_cols, in_rows, d_input[inCh], d_output[outCh], 
+                host_cov_b[outCh], filterAddr + outCh*COV1_FILTER_N*COV1_FILTER_N, filterSize,
                 false, (inCh==0)?true:false, (inCh==63)?true:false, 
                 totalPaddingHeight, totalPaddingWidth, topPadding, leftPadding);
         }
@@ -336,6 +411,12 @@ int main( int argc, char *argv[])
     // Setup filter values
     std::fill(&host_cov1_b[0], &host_cov1_b[0] + COV1_FILTER_OUT_CH, 1.0);
     std::fill(&host_cov1_filter[0][0][0][0], &host_cov1_filter[0][0][0][0] + COV1_FILTER_IN_CH * COV1_FILTER_OUT_CH * COV1_FILTER_N * COV1_FILTER_N, 1.0);
+
+    std::fill(&host_cov2_b[0], &host_cov2_b[0] + COV2_FILTER_OUT_CH, 1.0);
+    std::fill(&host_cov2_filter[0][0][0][0], &host_cov2_filter[0][0][0][0] + COV2_FILTER_IN_CH * COV2_FILTER_OUT_CH * COV2_FILTER_N * COV2_FILTER_N, 1.0);
+    
+    std::fill(&host_cov3_b[0], &host_cov3_b[0] + COV3_FILTER_OUT_CH, 1.0);
+    std::fill(&host_cov3_filter[0][0][0][0], &host_cov3_filter[0][0][0][0] + COV3_FILTER_IN_CH * COV3_FILTER_OUT_CH * COV3_FILTER_N * COV3_FILTER_N, 1.0);
 
     gpuErrchk(cudaDeviceReset());
 
@@ -363,7 +444,6 @@ int main( int argc, char *argv[])
     cudaEvent_t events[64+64];
     int out_col = INPUT_WIDTH, out_row = INPUT_HEIGHT;
 
-    // Perform First convolution layer
     float *d_in[COV1_FILTER_OUT_CH]; 
     float *d_out[COV1_FILTER_OUT_CH];
     for (int i=0; i < COV1_FILTER_OUT_CH; ++i) {
@@ -371,6 +451,32 @@ int main( int argc, char *argv[])
         gpuErrchk(cudaEventCreate(&events[i]));
         gpuErrchk(cudaEventCreate(&events[i + 64]));
     }
+
+#ifdef ENABLE_LINEAR_LAYER
+    // linear layers setup
+    // alloc memory host-side for weights and biases needed in linear layers
+    float *h_W1 = (float *) malloc (INPUT_SIZE1 * OUTPUT_SIZE1 * sizeof(float));
+    float *h_b1 = (float *) malloc (OUTPUT_SIZE1 * sizeof(float));
+    float *h_W2 = (float *) malloc (INPUT_SIZE2 * OUTPUT_SIZE2 * sizeof(float));
+    float *h_b2 = (float *) malloc (OUTPUT_SIZE2 * sizeof(float));
+    float *h_linear_out = (float *) malloc (OUTPUT_SIZE2 * sizeof(float)); // host output of linear layers
+    // pinning host memory
+    gpuErrchk(cudaHostRegister(h_W1, INPUT_SIZE1 * OUTPUT_SIZE1 * sizeof(float), 0));
+    gpuErrchk(cudaHostRegister(h_b1, OUTPUT_SIZE1 * sizeof(float), 0));
+    gpuErrchk(cudaHostRegister(h_W2, INPUT_SIZE2 * OUTPUT_SIZE2 * sizeof(float), 0));
+    gpuErrchk(cudaHostRegister(h_b2, OUTPUT_SIZE2 * sizeof(float), 0));
+    // init weights and biases
+    std::fill(h_W1, h_W1 + INPUT_SIZE1 * OUTPUT_SIZE1, 1.0);
+    std::fill(h_b1, h_b1 + OUTPUT_SIZE1, 1.0);
+    std::fill(h_W2, h_W2 + INPUT_SIZE2 * OUTPUT_SIZE2, 1.0);
+    std::fill(h_b2, h_b2 + OUTPUT_SIZE2, 1.0);
+    float *d_W1;
+    float *d_b1;
+    float *d_W2;
+    float *d_b2;
+    float *d_linear_out1;
+    float *d_linear_out2;
+#endif
 //================= Timing Begins ========================
     double start_time=getTimeStamp();
     
@@ -396,13 +502,13 @@ int main( int argc, char *argv[])
     // Input not needed anymore by device
     for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
         gpuErrchk(cudaFree(d_in[ch]));
-        
     }
 
     // Perform second convolution layer
     std::copy(d_out, d_out + COV2_FILTER_OUT_CH, d_in);
     layer_covMulti(out_col, out_row, streams, events,
-        d_in, d_out, COV2_FILTER_N);
+        d_in, d_out, COV2_FILTER_N, 
+        &host_cov2_filter[0][0][0][0], host_cov2_b);
 
     // Input not needed anymore by device
     for (int ch=0; ch < COV2_FILTER_OUT_CH; ++ch) {
@@ -422,12 +528,44 @@ int main( int argc, char *argv[])
 
     // Perform third convolution layer
     std::copy(d_out, d_out + COV3_FILTER_OUT_CH, d_in);
-    layer_covMulti(out_col, out_row, streams, &events[64], d_in, d_out, COV3_FILTER_N);
+    layer_covMulti(out_col, out_row, streams, &events[64], 
+        d_in, d_out, COV3_FILTER_N,
+        &host_cov3_filter[0][0][0][0], host_cov3_b);
 
     // Input not needed anymore by device
     for (int ch=0; ch < COV3_FILTER_OUT_CH; ++ch) {
         gpuErrchk(cudaFree(d_in[ch]));
     }
+
+#ifdef ENABLE_LINEAR_LAYER
+    // flatten third convolution layer output
+    float *d_flattened;
+    gpuErrchk( cudaMalloc( (void **) &d_flattened, COV3_FILTER_OUT_CH*out_col*out_row * sizeof(float) ) );
+    for(int ch = 0; ch < COV3_FILTER_OUT_CH; ch++) {
+        flatten<<<64, 1024>>>(d_out[ch], d_flattened, ch, out_row*out_col);
+    }
+
+    // linear layers
+    // alloc weights and bias memory device side
+    gpuErrchk( cudaMalloc( (void **) &d_W1, INPUT_SIZE1 * OUTPUT_SIZE1 * sizeof(float) ) );
+    gpuErrchk( cudaMalloc( (void **) &d_b1, OUTPUT_SIZE1 * sizeof(float) ) );
+    gpuErrchk( cudaMalloc( (void **) &d_W2, INPUT_SIZE2 * OUTPUT_SIZE2 * sizeof(float) ) );
+    gpuErrchk( cudaMalloc( (void **) &d_b2, OUTPUT_SIZE2 * sizeof(float) ) );
+    gpuErrchk( cudaMalloc( (void **) &d_linear_out1, OUTPUT_SIZE1 * sizeof(float) ) );
+    gpuErrchk( cudaMalloc( (void **) &d_linear_out2, OUTPUT_SIZE2 * sizeof(float) ) );
+
+    // transfer weights and biases to device
+    gpuErrchk( cudaMemcpy(d_W1, h_W1, INPUT_SIZE1 * OUTPUT_SIZE1 * sizeof(float), cudaMemcpyHostToDevice) );
+    gpuErrchk( cudaMemcpy(d_b1, h_b1, OUTPUT_SIZE1 * sizeof(float), cudaMemcpyHostToDevice) );
+    gpuErrchk( cudaMemcpy(d_W2, h_W2, INPUT_SIZE2 * OUTPUT_SIZE2 * sizeof(float), cudaMemcpyHostToDevice) );
+    gpuErrchk( cudaMemcpy(d_b2, h_b2, OUTPUT_SIZE2 * sizeof(float), cudaMemcpyHostToDevice) );
+
+    // linear layer 1: input: d_flattened (1x22400) output: (1x256)
+    linear<<<64, 1024>>>(d_linear_out1, d_flattened, d_W1, d_b1, INPUT_SIZE1, OUTPUT_SIZE1, false);
+    // linear layer 2: input: d_linear_out1 (1x256) output: (1x3)
+    linear<<<64, 1024>>>(d_linear_out2, d_linear_out1, d_W2, d_b2, INPUT_SIZE2, OUTPUT_SIZE2, true);
+
+    gpuErrchk( cudaDeviceSynchronize() );
 
     // Need to wait for stream to complete copy
     for (int i = 0; i < NUM_STREAM; ++i) {
@@ -435,11 +573,42 @@ int main( int argc, char *argv[])
         gpuErrchk(cudaStreamDestroy(streams[i]));
     }
 
+    // copy data back
+    gpuErrchk( cudaMemcpy(h_linear_out, d_linear_out2, OUTPUT_SIZE2 * sizeof(float), cudaMemcpyDeviceToHost) );
+
+    // softmax on the output of second linear layer
+    h_linear_out = softmax(OUTPUT_SIZE2, h_linear_out);
+#endif
+
     double end_time=getTimeStamp();
 //================= Timing Ends ========================    
     int total_time_ms = (int)ceil((end_time-start_time)*1000);
     
 #ifdef PRINTDATA
+#ifdef ENABLE_LINEAR_LAYER
+    // print flattened output
+    int flattenedBytes = COV3_FILTER_OUT_CH*out_col*out_row*sizeof(float);
+    float *h_flattened = (float *) malloc (flattenedBytes);
+    gpuErrchk(cudaMemcpy(h_flattened, d_flattened, flattenedBytes, cudaMemcpyDeviceToHost));
+    for (int i = 0; i < COV3_FILTER_OUT_CH; i++) {
+        printf("Output ch%d:\n", i);
+        for (int j = 0; j < out_row; j++) {
+            for (int k = 0; k < out_col; k++) {
+                printf("%f ", h_flattened[k + j*out_col + i*out_row*out_col]);
+            }
+            printf("\n");
+        }
+    }    
+    printf("\n");
+
+    // print final output
+    printf("Softmax output:\n");
+    for (int j = 0; j < OUTPUT_SIZE2; j++) {
+        printf("%f ", h_linear_out[j]);
+    }
+    printf("\n");
+#else
+
     // Allocate host output to print results for debugging
     float *h_output[COV1_FILTER_OUT_CH];
     bytes = out_col*out_row*sizeof(float);
@@ -452,7 +621,6 @@ int main( int argc, char *argv[])
         }
     
         gpuErrchk(cudaHostRegister(h_output[ch], bytes, 0));
-    
         gpuErrchk(cudaMemcpy(h_output[ch], d_out[ch], out_col*out_row*sizeof(float), cudaMemcpyDeviceToHost));
 
         // Need to wait for stream to complete copy
@@ -463,6 +631,7 @@ int main( int argc, char *argv[])
 
         free(h_output[ch]);
     }
+#endif
 #endif
 
     printf("Total Time: %d\n", total_time_ms);
