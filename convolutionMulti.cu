@@ -40,12 +40,12 @@ However, threads will not be indexed top left of convolution with filter
 #include "cnn_weights.cu"
 #include <cmath>
 //#include "cublas_v2.h"
-#include "utils.cu"
 
 //#define PRINTDATA 1
 //#define SHMEM 1
 //#define DebugSHMEM 1
 //#define DebugSHMEM_Data 1
+//#define GET_TIMING_BREAKDOWN 1
 
 #define INPUT_WIDTH 100//2048
 #define INPUT_HEIGHT 56//2048
@@ -54,14 +54,20 @@ However, threads will not be indexed top left of convolution with filter
 #define PAD_VALUE -INFINITY
 #define MAX_TOL 1e-3
 #define POOL_SIZE 2
-#define STRIDE POOL_SIZE
+#define STRIDE POOL_SIZE // 1
 
 // Linear Config
 #define ENABLE_LINEAR_LAYER 1
-#define INPUT_SIZE1 22400
+#if STRIDE == POOL_SIZE
+#define INPUT_SIZE1 22400 // 64x(14x25)
+#else // STRIDE == 1
+#define INPUT_SIZE1 358400 // 64x(56x100)
+#endif
 #define OUTPUT_SIZE1 256
 #define INPUT_SIZE2 256
 #define OUTPUT_SIZE2 3
+
+#include "utils.cu"
 
 // Currently a thread per pooling, but thread no reading coalesed
 // could read coalesed by copying to shared memory and then reorder in shared memory linearly
@@ -850,59 +856,104 @@ int main( int argc, char *argv[])
 //================= Timing Begins ========================
     double start_time=getTimeStamp();
 
+    // Allocate input matrix
     float *d_input = allocDeviceBlock(bytes);
     if (d_input == NULL) {
         printf("Error: Failed to allocte host memory for input");
         return 1;
     }
 
+#ifdef GET_TIMING_BREAKDOWN
+    double in_alloc_time=getTimeStamp();
+#endif
+
     // Perform First convolution layer
     layer1_cov1_multi(bytes, grid, block, h_input, d_input, d_out);
+
+#ifdef GET_TIMING_BREAKDOWN
+    double cov1_time=getTimeStamp();
+#endif
 
     // Input Not needed anymore by device
     gpuErrchk(cudaHostUnregister(h_input));
     free(h_input);
     gpuErrchk(cudaFree(d_input));
 
+#ifdef GET_TIMING_BREAKDOWN
+    double free_input_time=getTimeStamp();
+#endif
+
     // Perform first max pooling on the output from the first convolution layer
     std::copy(d_out, d_out + COV1_FILTER_OUT_CH, d_in);
     layer1_maxPool_multi(INPUT_WIDTH, INPUT_HEIGHT, d_in, 
         out_col, out_row, d_out);
+
+#ifdef GET_TIMING_BREAKDOWN
+    double maxpool1_time=getTimeStamp();
+#endif
 
     // Input not needed anymore by device
     for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
         gpuErrchk(cudaFree(d_in[ch]));
     }
 
+#ifdef GET_TIMING_BREAKDOWN
+    double free_cov1_time=getTimeStamp();
+#endif
+
     // Perform second convolution layer
     std::copy(d_out, d_out + COV2_FILTER_OUT_CH, d_in);
     layer2_cov_multi(COV2_FILTER_OUT_CH, COV2_FILTER_N, out_col, out_row, 
         d_in, d_out, &host_cov2_filter[0][0][0][0], host_cov2_b);
 
+#ifdef GET_TIMING_BREAKDOWN
+    double cov2_time=getTimeStamp();
+#endif
+
     // Input not needed anymore by device
     for (int ch=0; ch < COV2_FILTER_OUT_CH; ++ch) {
         gpuErrchk(cudaFree(d_in[ch]));
     }
+
+#ifdef GET_TIMING_BREAKDOWN
+    double free_maxpool1_time=getTimeStamp();
+#endif
 
     // Perform second max pooling on the output from the second convolution layer
     std::copy(d_out, d_out + COV2_FILTER_OUT_CH, d_in);
     layer1_maxPool_multi(out_col, out_row, d_in, 
         out_col, out_row, d_out);
 
+#ifdef GET_TIMING_BREAKDOWN
+    double maxpool2_time=getTimeStamp();
+#endif
+
     // Input not needed anymore by device
     for (int ch=0; ch < COV2_FILTER_OUT_CH; ++ch) {
         gpuErrchk(cudaFree(d_in[ch]));
     }
+
+#ifdef GET_TIMING_BREAKDOWN
+    double free_cov2_time=getTimeStamp();
+#endif
 
     // Perform third convolution layer
     std::copy(d_out, d_out + COV3_FILTER_OUT_CH, d_in);
     layer2_cov_multi(COV3_FILTER_OUT_CH, COV3_FILTER_N, out_col, out_row, 
         d_in, d_out, &host_cov3_filter[0][0][0][0], host_cov3_b);
 
+#ifdef GET_TIMING_BREAKDOWN
+    double cov3_time=getTimeStamp();
+#endif
+
     // Input not needed anymore by device
     for (int ch=0; ch < COV3_FILTER_OUT_CH; ++ch) {
         gpuErrchk(cudaFree(d_in[ch]));
     }
+    
+#ifdef GET_TIMING_BREAKDOWN
+    double free_maxpool2_time=getTimeStamp();
+#endif
 
 #ifdef ENABLE_LINEAR_LAYER
     // flatten third convolution layer output
@@ -911,6 +962,10 @@ int main( int argc, char *argv[])
     for(int ch = 0; ch < COV3_FILTER_OUT_CH; ch++) {
         flatten<<<64, 1024>>>(d_out[ch], d_flattened, ch, out_row*out_col);
     }
+#ifdef GET_TIMING_BREAKDOWN
+    gpuErrchk( cudaDeviceSynchronize() );
+    double flatten_time=getTimeStamp();
+#endif
     
     // linear layers
     // alloc weights and bias memory device side
@@ -927,11 +982,21 @@ int main( int argc, char *argv[])
     gpuErrchk( cudaMemcpy(d_W2, h_W2, INPUT_SIZE2 * OUTPUT_SIZE2 * sizeof(float), cudaMemcpyHostToDevice) );
     gpuErrchk( cudaMemcpy(d_b2, h_b2, OUTPUT_SIZE2 * sizeof(float), cudaMemcpyHostToDevice) );
 
+#ifdef GET_TIMING_BREAKDOWN
+    gpuErrchk( cudaDeviceSynchronize() );
+    double linear_layer_setup=getTimeStamp();
+#endif
+
     // linear layer 1: input: d_flattened (1x22400) output: (1x256)
     linear<<<64, 1024>>>(d_linear_out1, d_flattened, d_W1, d_b1, INPUT_SIZE1, OUTPUT_SIZE1, false);
     // linear layer 2: input: d_linear_out1 (1x256) output: (1x3)
     linear<<<64, 1024>>>(d_linear_out2, d_linear_out1, d_W2, d_b2, INPUT_SIZE2, OUTPUT_SIZE2, true);
+
     gpuErrchk( cudaDeviceSynchronize() );
+
+#ifdef GET_TIMING_BREAKDOWN
+    double linear_layer_time=getTimeStamp();
+#endif
 
     // copy data back
     gpuErrchk( cudaMemcpy(h_linear_out, d_linear_out2, OUTPUT_SIZE2 * sizeof(float), cudaMemcpyDeviceToHost) );
