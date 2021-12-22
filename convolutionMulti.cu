@@ -46,6 +46,7 @@ However, threads will not be indexed top left of convolution with filter
 //#define DebugSHMEM 1
 //#define DebugSHMEM_Data 1
 //#define GET_TIMING_BREAKDOWN 1
+//#define Free_Memory 1
 
 #define INPUT_WIDTH 100//2048
 #define INPUT_HEIGHT 56//2048
@@ -768,8 +769,8 @@ void layer2_cov_multi(int outChSize, int filterSize, int in_cols, int in_rows, f
                 totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
         }
 #endif
-        gpuErrchk(cudaDeviceSynchronize());
     }
+    gpuErrchk(cudaDeviceSynchronize());
 }
 
 
@@ -875,10 +876,12 @@ int main( int argc, char *argv[])
     double cov1_time=getTimeStamp();
 #endif
 
+#ifdef Free_Memory
     // Input Not needed anymore by device
     gpuErrchk(cudaHostUnregister(h_input));
     free(h_input);
     gpuErrchk(cudaFree(d_input));
+#endif 
 
 #ifdef GET_TIMING_BREAKDOWN
     double free_input_time=getTimeStamp();
@@ -893,10 +896,12 @@ int main( int argc, char *argv[])
     double maxpool1_time=getTimeStamp();
 #endif
 
+#ifdef Free_Memory
     // Input not needed anymore by device
     for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
         gpuErrchk(cudaFree(d_in[ch]));
     }
+#endif 
 
 #ifdef GET_TIMING_BREAKDOWN
     double free_cov1_time=getTimeStamp();
@@ -911,10 +916,12 @@ int main( int argc, char *argv[])
     double cov2_time=getTimeStamp();
 #endif
 
+#ifdef Free_Memory
     // Input not needed anymore by device
     for (int ch=0; ch < COV2_FILTER_OUT_CH; ++ch) {
         gpuErrchk(cudaFree(d_in[ch]));
     }
+#endif 
 
 #ifdef GET_TIMING_BREAKDOWN
     double free_maxpool1_time=getTimeStamp();
@@ -929,10 +936,12 @@ int main( int argc, char *argv[])
     double maxpool2_time=getTimeStamp();
 #endif
 
+#ifdef Free_Memory
     // Input not needed anymore by device
     for (int ch=0; ch < COV2_FILTER_OUT_CH; ++ch) {
         gpuErrchk(cudaFree(d_in[ch]));
     }
+#endif 
 
 #ifdef GET_TIMING_BREAKDOWN
     double free_cov2_time=getTimeStamp();
@@ -947,10 +956,12 @@ int main( int argc, char *argv[])
     double cov3_time=getTimeStamp();
 #endif
 
+#ifdef Free_Memory
     // Input not needed anymore by device
     for (int ch=0; ch < COV3_FILTER_OUT_CH; ++ch) {
         gpuErrchk(cudaFree(d_in[ch]));
     }
+#endif 
     
 #ifdef GET_TIMING_BREAKDOWN
     double free_maxpool2_time=getTimeStamp();
