@@ -39,13 +39,14 @@ However, threads will not be indexed top left of convolution with filter
 #include <algorithm>
 #include "cnn_weights.cu"
 
-//#define PRINTDATA 1
+//#define PRINTDATA 1 // Print Ouput Results
 //#define EnableLock 1
 
-//#define SHMEM 1
+//#define SHMEM 1   // Enable shared memory for convolution
 //#define DebugSHMEM 1
 //#define DebugSHMEM_Data 1
 
+// Input Matrix Dimensions
 #define INPUT_WIDTH 100//2048
 #define INPUT_HEIGHT 56//2048
 

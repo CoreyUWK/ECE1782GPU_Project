@@ -41,13 +41,14 @@ However, threads will not be indexed top left of convolution with filter
 #include <cmath>
 //#include "cublas_v2.h"
 
-//#define PRINTDATA 1
-//#define SHMEM 1
+//#define PRINTDATA 1 // Print Ouput Results
+//#define SHMEM 1   // Enable shared memory for convolution
 //#define DebugSHMEM 1
 //#define DebugSHMEM_Data 1
 //#define GET_TIMING_BREAKDOWN 1
 //#define Free_Memory 1
 
+// Input Matrix Dimensions
 #define INPUT_WIDTH 100//2048
 #define INPUT_HEIGHT 56//2048
 
