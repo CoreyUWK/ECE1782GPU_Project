@@ -45,7 +45,7 @@ However, threads will not be indexed top left of convolution with filter
 //#define SHMEM 1   // Enable shared memory for convolution
 //#define DebugSHMEM 1
 //#define DebugSHMEM_Data 1
-//#define GET_TIMING_BREAKDOWN 1
+//#define GET_TIMING_BREAKDOWN 1 // Enable CNN timing breakdown print
 //#define Free_Memory 1
 
 // Input Matrix Dimensions
@@ -583,24 +583,32 @@ __global__ void flatten(float *d_conv_out, float *d_flattened, int channel, int 
 }
 
 __global__ void linear(float *output, float *input, float *W, float *b, int inSize, int outSize, bool isFinal) {
-    int j = blockDim.x * blockIdx.x + threadIdx.x;
+    int outNeuron = blockDim.x * blockIdx.x + threadIdx.x;
 
-    if ((j >= outSize)) {
+    if (outNeuron >= outSize) {
         return;
     }
 
+    /* Weight Layout:
+    Threads read first row, then next iteration threads read next row, ...
+         v v v v      v
+    Out: 1 2 3 4 ... 256
+    IN:  1 2 3 4 ... 256
+         ... ... ... ...
+         Last Input Row
+
+    This allows for threads to read memory contigously */
     float sum = 0.0;
-    for (int i = 0; i < inSize; i++) {
-        int offset = i * outSize + j;
+    for (int i = 0, offset = outNeuron; i < inSize; ++i, offset += outSize) {
         sum += input[i] * W[offset];
     }
 
     // final linear layer don't use relu
     if (isFinal) {
-        output[j] = sum + b[j];
+        output[outNeuron] = sum + b[outNeuron];
     }
     else {
-        output[j] = relu(sum + b[j]);
+        output[outNeuron] = relu(sum + b[outNeuron]);
     }
 }
 
@@ -968,13 +976,21 @@ int main( int argc, char *argv[])
     double free_maxpool2_time=getTimeStamp();
 #endif
 
+    gpuErrchk(cudaDeviceSynchronize());
+
 #ifdef ENABLE_LINEAR_LAYER
     // flatten third convolution layer output
     float *d_flattened;
+    int flattenOutSize = out_col*out_row;
     gpuErrchk( cudaMalloc( (void **) &d_flattened, COV3_FILTER_OUT_CH*out_col*out_row * sizeof(float) ) );
+    
+    dim3 block1((flattenOutSize < 1024) ? flattenOutSize : 1024); 
+    dim3 grid1( (flattenOutSize + block.x-1) / block.x);
+
     for(int ch = 0; ch < COV3_FILTER_OUT_CH; ch++) {
-        flatten<<<64, 1024>>>(d_out[ch], d_flattened, ch, out_row*out_col);
+        flatten<<<grid1, block1>>>(d_out[ch], d_flattened, ch, out_row*out_col);
     }
+
 #ifdef GET_TIMING_BREAKDOWN
     gpuErrchk( cudaDeviceSynchronize() );
     double flatten_time=getTimeStamp();
@@ -1001,9 +1017,9 @@ int main( int argc, char *argv[])
 #endif
 
     // linear layer 1: input: d_flattened (1x22400) output: (1x256)
-    linear<<<64, 1024>>>(d_linear_out1, d_flattened, d_W1, d_b1, INPUT_SIZE1, OUTPUT_SIZE1, false);
+    linear<<<1, OUTPUT_SIZE1>>>(d_linear_out1, d_flattened, d_W1, d_b1, INPUT_SIZE1, OUTPUT_SIZE1, false);
     // linear layer 2: input: d_linear_out1 (1x256) output: (1x3)
-    linear<<<64, 1024>>>(d_linear_out2, d_linear_out1, d_W2, d_b2, INPUT_SIZE2, OUTPUT_SIZE2, true);
+    linear<<<1, OUTPUT_SIZE2>>>(d_linear_out2, d_linear_out1, d_W2, d_b2, INPUT_SIZE2, OUTPUT_SIZE2, true);
 
     gpuErrchk( cudaDeviceSynchronize() );
 
@@ -1020,8 +1036,16 @@ int main( int argc, char *argv[])
 
     double end_time=getTimeStamp();
 //================= Timing Ends ========================    
-    int total_time_ms = (int)ceil((end_time-start_time)*1000);
-    //int constMemFilter_time_ms = (int)ceil((constMemFilter_time - start_time)*1000);
+    float total_time_ms = (end_time-start_time)*1000.0;
+#ifdef GET_TIMING_BREAKDOWN
+    float alloc_input_ms = (in_alloc_time-start_time)*1000.0;
+    float cov1_time_ms = (cov1_time-in_alloc_time)*1000.0;
+    float maxpool1_time_ms = (maxpool1_time-free_input_time)*1000.0;
+    float cov2_time_ms = (cov2_time-free_cov1_time)*1000.0;
+    float maxpool2_time_ms = (maxpool2_time-free_maxpool1_time)*1000.0;
+    float cov3_time_ms = (cov3_time-free_cov2_time)*1000.0;
+    float linear_layer_ms = (linear_layer_time-free_maxpool2_time)*1000.0;
+#endif
     
 #ifdef PRINTDATA
 #ifdef ENABLE_LINEAR_LAYER
@@ -1066,8 +1090,15 @@ int main( int argc, char *argv[])
         gpuErrchk(cudaFree(d_out[ch]));
     }
 
-    printf("Total Time: %d\n", total_time_ms);
-    //printf("Filter Cpy Time: %d\n", constMemFilter_time_ms);
+    printf("Total Time: %f\n", total_time_ms);
+#ifdef GET_TIMING_BREAKDOWN
+    printf("Cov1 Time: %f\n", cov1_time_ms);
+    printf("Maxpool1 Time: %f\n", maxpool1_time_ms);
+    printf("Cov2 Time: %f\n", cov2_time_ms);
+    printf("Maxpool2 Time: %f\n", maxpool2_time_ms);
+    printf("Cov3 Time: %f\n", cov3_time_ms);
+    printf("Linear Layer Time: %f\n", linear_layer_ms);
+#endif
 
     gpuErrchk(cudaDeviceReset());
 
