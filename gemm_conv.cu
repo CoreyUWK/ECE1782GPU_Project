@@ -17,6 +17,8 @@ nvcc gemm_conv.cu -o gemm.o -lcublas && ./gemm.o
 #include <cmath>
 #include "utils.cu"
 
+//#define GET_TIMING_BREAKDOWN 1 // Enable CNN timing breakdown print
+
 // Defining Cuda check error and safe call macros
 #define CUDA_CHECK_ERROR
 #define CudaSafeCall(err) __CudaSafeCall(err, __FILE__, __LINE__)
@@ -81,7 +83,6 @@ __global__ void transform_image(float *input, const float *raw_input, const int 
     
     input[(thread_id + 1) * hidden_width - 1] = 1;
 }
-
 
 
 __global__ void transform(float *input, const float *raw_input, const int width,const int height,const int channels, const int filter_width)
@@ -163,7 +164,6 @@ void convolution(int width, int height, int channels, int num_filters, int filte
     cudaFree(d_input);
     cudaFree(d_weights);
     gpuErrchk(cudaDeviceSynchronize());
-
 }
 
 
@@ -175,13 +175,28 @@ int main(int argc, char **argv)
     double start_time=getTimeStamp();
     // Stacking layers to time them
     // This is done only to get timing performance 
-    convolution(56,100, 1, 64,8);    
-    convolution(28,50, 64, 64,5);
-    convolution(14,25, 64, 64,3);
+    convolution(56,100, 1, 64, 8);    
+#ifdef GET_TIMING_BREAKDOWN
+    double cov1_time=getTimeStamp();
+#endif
+    convolution(28,50, 64, 64, 4);
+#ifdef GET_TIMING_BREAKDOWN
+    double cov2_time=getTimeStamp();
+#endif
+    convolution(14,25, 64, 64, 2);
     double end_time=getTimeStamp();
-
+    
     float total_time_ms = (end_time-start_time)*1000.0;
     printf("Total Time: %f\n", total_time_ms);
+#ifdef GET_TIMING_BREAKDOWN
+    float cov1_time_ms = (cov1_time - start_time) * 1000.0;
+    float cov2_time_ms = (cov2_time - cov1_time) * 1000.0;
+    float cov3_time_ms = (end_time - cov2_time) * 1000.0;
+
+    printf("Cov1 Time: %f\n", cov1_time_ms);
+    printf("Cov2 Time: %f\n", cov2_time_ms);
+    printf("Cov3 Time: %f\n", cov3_time_ms);
+#endif
 
     // Destroying cublas handler
     cublasDestroy(cubHandle);
