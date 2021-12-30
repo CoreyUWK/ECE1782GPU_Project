@@ -42,7 +42,9 @@ However, threads will not be indexed top left of convolution with filter
 //#define PRINTDATA 1 // Print Ouput Results
 //#define EnableLock 1
 //#define GET_TIMING_BREAKDOWN 1 // Enable CNN timing breakdown print
+//#define Enable_Version3_Conv 1 // Enable to run this version, but is slower
 
+//NOTE: Shared memory not completed here as didn't make difference in initial test
 //#define SHMEM 1   // Enable shared memory for convolution
 //#define DebugSHMEM 1
 //#define DebugSHMEM_Data 1
@@ -216,6 +218,66 @@ __global__ void device_CNN(int in_cols, int in_rows, float *inCh, float *outCh, 
     }
 }
 
+// Is Slow
+#ifdef Enable_Version3_Conv
+/* This solution attempts to read one time from input and then write the value to the appropriate location in output for convolution */
+__global__ void device_CNN_Multi_v3(int ch, int in_cols, int in_rows, float *inCh, float *outCh, int filterSize,
+    int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
+    // Position relative to global memory of 2D matrix
+    const int x = threadIdx.x + blockIdx.x * blockDim.x;
+    const int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+    if (x >= in_cols || y >= in_rows) {
+        return;
+    }
+
+    // Read input element
+    const int offset_In_GM = y * in_cols + x;
+    float inData = inCh[offset_In_GM];
+
+    // Get Position in Padded Matrix
+    int x_pad = x + leftPadding;
+    if (x_pad >= in_cols) x_pad = in_cols - 1;
+    int y_pad = y + topPadding;
+    if (y_pad >= in_rows) y_pad = in_rows - 1;
+
+    // Output has been cudaMemset to zero before call
+    const int chSize = in_cols * in_rows;
+
+    // Write to output
+    int offset_Out_GM = y_pad * in_cols + x_pad;
+    float *filterChOffset = &device_cov1_filter[0][ch][0][0];
+    float *out = outCh + offset_Out_GM;
+       
+    for (int col=0, y_offset=y_pad; y_offset >= max(0, y + topPadding - filterSize -1); --y_offset, 
+        filterChOffset += filterSize, out -= (in_cols - col)) {
+        
+        col = 0;
+        for (int x_offset=x_pad; x_offset >= max(0, x + leftPadding - filterSize -1) && col <= filterSize;
+                ++col, --x_offset, out -= 1) {
+            *out += (inData * *(filterChOffset + col));
+            //__syncthreads();
+        }
+    }
+}
+
+// Run this for Single and Last
+__global__ void device_CNN_Multi_v3_End(float *outCh, int out_cols, int out_rows, float b) {
+    // Position relative to global memory of 2D matrix
+    const int x = threadIdx.x + blockIdx.x * blockDim.x;
+    const int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+    if (x >= out_cols || y >= out_rows) {
+        return;
+    }
+
+    int offset_Out_GM = y * out_cols + x;
+
+    // Write to output
+    float *out = outCh + offset_Out_GM; // &device_output[ch][offset_Out_GM];
+    *out = relu(*out + b);
+}
+#endif
 
 float* allocHostBlockHelper(std::vector<float*> &h_freeBlocks, std::mutex &h_freeBlocksMutex, int bytes) {
     float *mem = NULL;
@@ -318,10 +380,22 @@ void layer_cov(int in_cols, int in_rows, cudaStream_t *streams, cudaEvent_t &eve
         // Get output memory
         if (d_output[i] == NULL) {
             gpuErrchk(cudaMalloc((void **)&d_output[i], bytes));
+#ifdef Enable_Version3_Conv
+            gpuErrchk(cudaMemsetAsync(d_output[i], 0.0, bytes, streams[i]));
+#endif
         }
+#ifdef Enable_Version3_Conv
+        device_CNN_Multi_v3<<<grid, block, 0, streams[i]>>>(i, in_cols, in_rows, d_input, d_output[i],  COV1_FILTER_N,
+            totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
+
+        // To add ReLU and bias
+        // Thread handles one element
+        device_CNN_Multi_v3_End<<<grid,block, 0, streams[i]>>>(d_output[i], in_cols, in_rows, host_cov1_b[i]);
+#else 
         device_CNN<<<grid, block, 0, streams[i]>>>(in_cols, in_rows, d_input, d_output[i], host_cov1_b[i], filterAddr + i*COV1_FILTER_N*COV1_FILTER_N, COV1_FILTER_N,
             true, false, false, 
             totalPaddingHeight, totalPaddingWidth, topPadding, leftPadding);
+#endif
     }
 
     // TODO: fix not needing this
@@ -399,11 +473,23 @@ void layer_covMulti(int in_cols, int in_rows, cudaStream_t *streams, cudaEvent_t
             // Get output memory
             if (inCh == 0) {
                 gpuErrchk(cudaMalloc((void **)&d_output[outCh], bytes));
+#ifdef Enable_Version3_Conv
+                gpuErrchk(cudaMemsetAsync(d_output[outCh], 0.0, bytes, streams[COV2_FILTER_IN_CH+outCh]));
+#endif
             }
+#ifdef Enable_Version3_Conv
+            device_CNN_Multi_v3<<<grid, block, 0, streams[COV2_FILTER_IN_CH + outCh]>>>(outCh, in_cols, in_rows, d_input[inCh], d_output[outCh], filterSize,
+                totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
+
+            // To add ReLU and bias
+            // Thread handles one element
+            device_CNN_Multi_v3_End<<<grid,block, 0, streams[COV2_FILTER_IN_CH + outCh]>>>(d_output[outCh], in_cols, in_rows, host_cov1_b[outCh]);
+#else
             device_CNN<<<grid, block, 0, streams[COV2_FILTER_IN_CH + outCh]>>>(in_cols, in_rows, d_input[inCh], d_output[outCh], 
                 host_cov_b[outCh], filterAddr + outCh*COV1_FILTER_N*COV1_FILTER_N, filterSize,
                 false, (inCh==0)?true:false, (inCh==63)?true:false, 
                 totalPaddingHeight, totalPaddingWidth, topPadding, leftPadding);
+#endif
         }
     }
 

@@ -41,14 +41,14 @@ However, threads will not be indexed top left of convolution with filter
 #include "utils.cu"
 
 //#define PRINTDATA 1
-#define EnableLock 1
+//#define EnableLock 1
 
 //#define SHMEM 1
 //#define DebugSHMEM 1
 //#define DebugSHMEM_Data 1
 
-#define INPUT_WIDTH 100//2048//100
-#define INPUT_HEIGHT 56//2048//56
+#define INPUT_WIDTH 100 //2048
+#define INPUT_HEIGHT 56 //2048
 
 #define NUM_STREAM 200
 

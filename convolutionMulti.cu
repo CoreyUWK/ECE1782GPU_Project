@@ -47,6 +47,7 @@ However, threads will not be indexed top left of convolution with filter
 //#define DebugSHMEM_Data 1
 //#define GET_TIMING_BREAKDOWN 1 // Enable CNN timing breakdown print
 //#define Free_Memory 1
+//#define Enable_Version3_Conv 1 // Enable to run this version, but is slower
 
 // Input Matrix Dimensions
 #define INPUT_WIDTH 100//2048
@@ -338,7 +339,7 @@ __global__ void device_CNN_Multi_SHMEM(int in_cols, int in_rows, float *inCh, in
 }
 #else
 //template <int filterSize> // Can't template cause multiple functions with some at 77 registers
-__global__ void device_CNN_Multi_v1_single(int in_cols, int in_rows, float *inCh, int filterSize,
+__global__ void device_CNN_Multi_v1(int in_cols, int in_rows, float *inCh, int filterSize, bool isSingle, bool isFirst, bool isLast,
     int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
     // Position relative to global memory of 2D matrix
     const int x = threadIdx.x + blockIdx.x * blockDim.x;
@@ -370,135 +371,30 @@ __global__ void device_CNN_Multi_v1_single(int in_cols, int in_rows, float *inCh
 
     float *filterChOffset = &device_cov1_filter[0][0][0][0];
     float conv;
-    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch, filterChOffset += totalFilterSize) {
-        for (i = 0, conv = 0.0; i < totalFilterSize; ++i) {
-            conv += cacheIn[i] * *(filterChOffset + i);
-        }
-        device_output[ch][offset_GM] = relu(conv + device_cov1_b[ch]);
-    }
-}
-__global__ void device_CNN_Multi_v1_first(int in_cols, int in_rows, float *inCh, int filterSize, 
-    int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
-    // Position relative to global memory of 2D matrix
-    const int x = threadIdx.x + blockIdx.x * blockDim.x;
-    const int y = threadIdx.y + blockIdx.y * blockDim.y;
-
-    if (x >= in_cols || y >= in_rows) {
-        return;
-    }
-    int totalFilterSize = filterSize*filterSize;
-
-    const int offset_GM = y * in_cols + x;
-    int cnnOffset = offset_GM - topPadding*in_cols - leftPadding;
-    float cacheIn[COV1_FILTER_N * COV1_FILTER_N]; //NOTE requires constant size arg, else compiler complains (so constant memory), could make template
-    int boundryH = y - topPadding;
-    int boundryW = x - leftPadding;
-    int i = 0;
-    
-    for (int row=0; i < filterSize; ++i, row += filterSize, cnnOffset += in_cols, ++boundryH) {
-        for (int j = 0; j < filterSize; ++j) {
-            if (boundryH < 0 || boundryH >= in_rows || 
-                (boundryW + j < 0) || (boundryW + j >= in_cols)) {
-                cacheIn[row + j] = 0;
-            }               
-            else {
-                cacheIn[row + j] = inCh[cnnOffset + j];
-            }
-        }
-    }
-
-    float *filterChOffset = &device_cov1_filter[0][0][0][0];
-    float conv;
-    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch, filterChOffset += totalFilterSize) {
-        for (i = 0, conv = 0.0; i < totalFilterSize; ++i) {
-            conv += cacheIn[i] * *(filterChOffset + i);
-        }
-        device_output[ch][offset_GM] = conv;
-    }
-}
-__global__ void device_CNN_Multi_v1_middle(int in_cols, int in_rows, float *inCh, int filterSize,
-    int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
-    // Position relative to global memory of 2D matrix
-    const int x = threadIdx.x + blockIdx.x * blockDim.x;
-    const int y = threadIdx.y + blockIdx.y * blockDim.y;
-
-    if (x >= in_cols || y >= in_rows) {
-        return;
-    }
-    int totalFilterSize = filterSize*filterSize;
-
-    const int offset_GM = y * in_cols + x;
-    int cnnOffset = offset_GM - topPadding*in_cols - leftPadding;
-    float cacheIn[COV1_FILTER_N * COV1_FILTER_N]; //NOTE requires constant size arg, else compiler complains (so constant memory), could make template
-    int boundryH = y - topPadding;
-    int boundryW = x - leftPadding;
-    int i = 0;
-    
-    for (int row=0; i < filterSize; ++i, row += filterSize, cnnOffset += in_cols, ++boundryH) {
-        for (int j = 0; j < filterSize; ++j) {
-            if (boundryH < 0 || boundryH >= in_rows || 
-                (boundryW + j < 0) || (boundryW + j >= in_cols)) {
-                cacheIn[row + j] = 0;
-            }               
-            else {
-                cacheIn[row + j] = inCh[cnnOffset + j];
-            }
-        }
-    }
-
-    float *filterChOffset = &device_cov1_filter[0][0][0][0];
-    float conv;
-    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch, filterChOffset += totalFilterSize) {
-        for (i = 0, conv = 0.0; i < totalFilterSize; ++i) {
-            conv += cacheIn[i] * *(filterChOffset + i);
-        }
-        device_output[ch][offset_GM] += conv;
-    }
-}
-__global__ void device_CNN_Multi_v1_last(int in_cols, int in_rows, float *inCh, int filterSize,
-    int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
-    // Position relative to global memory of 2D matrix
-    const int x = threadIdx.x + blockIdx.x * blockDim.x;
-    const int y = threadIdx.y + blockIdx.y * blockDim.y;
-
-    if (x >= in_cols || y >= in_rows) {
-        return;
-    }
-    int totalFilterSize = filterSize*filterSize;
-
-    const int offset_GM = y * in_cols + x;
-    int cnnOffset = offset_GM - topPadding*in_cols - leftPadding;
-    float cacheIn[COV1_FILTER_N * COV1_FILTER_N]; //NOTE requires constant size arg, else compiler complains (so constant memory), could make template
-    int boundryH = y - topPadding;
-    int boundryW = x - leftPadding;
-    int i = 0;
-    
-    for (int row=0; i < filterSize; ++i, row += filterSize, cnnOffset += in_cols, ++boundryH) {
-        for (int j = 0; j < filterSize; ++j) {
-            if (boundryH < 0 || boundryH >= in_rows || 
-                (boundryW + j < 0) || (boundryW + j >= in_cols)) {
-                cacheIn[row + j] = 0;
-            }               
-            else {
-                cacheIn[row + j] = inCh[cnnOffset + j];
-            }
-        }
-    }
-
-    float *filterChOffset = &device_cov1_filter[0][0][0][0];
     float *out;
-    float conv;
     for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch, filterChOffset += totalFilterSize) {
         for (i = 0, conv = 0.0; i < totalFilterSize; ++i) {
             conv += cacheIn[i] * *(filterChOffset + i);
         }
-        out = &device_output[ch][offset_GM];
-        conv += *out + device_cov1_b[ch];
-        *out = relu(conv);
+        if (isSingle) {
+            device_output[ch][offset_GM] = relu(conv + device_cov1_b[ch]);
+        }
+        else if (isFirst) {
+            device_output[ch][offset_GM] = conv;
+        }
+        else if (isLast) {
+            out = &device_output[ch][offset_GM];
+            conv += *out + device_cov1_b[ch];
+            *out = relu(conv);
+        }
+        else { // Middle
+            device_output[ch][offset_GM] += conv;
+        }
     }
 }
+#endif
 
-
+#ifdef NOT_COMPLETE
 __global__ void device_CNN_Multi_v2(int in_cols, int in_rows, float *inCh, int filterSize, bool isSingle, bool isFirst, bool isLast,
     int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
     // Position relative to global memory of 2D matrix
@@ -554,6 +450,73 @@ __global__ void device_CNN_Multi_v2(int in_cols, int in_rows, float *inCh, int f
             }*/
         }
     }
+}
+#endif
+
+// Is slow
+#ifdef Enable_Version3_Conv
+/* This solution attempts to read one time from input and then write the value to the appropriate location in output for convolution */
+__global__ void device_CNN_Multi_v3(int in_cols, int in_rows, float *inCh, int filterSize,
+    int totalPaddingHeight, int totalPaddingWidth, int topPadding, int bottomPadding, int leftPadding, int rightPadding) {
+    // Position relative to global memory of 2D matrix
+    const int x = threadIdx.x + blockIdx.x * blockDim.x;
+    const int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+    if (x >= in_cols || y >= in_rows) {
+        return;
+    }
+
+    // Read input element
+    const int offset_In_GM = y * in_cols + x;
+    float inData = inCh[offset_In_GM];
+
+    // Get Position in Padded Matrix
+    int x_pad = x + leftPadding;
+    if (x_pad >= in_cols) x_pad = in_cols - 1;
+    int y_pad = y + topPadding;
+    if (y_pad >= in_rows) y_pad = in_rows - 1;
+
+    // Output has been cudaMemset to zero before call
+    const int chSize = in_cols * in_rows;
+
+    // Write to output
+    int offset_Out_GM = y_pad * in_cols + x_pad;
+    float *filterChOffset = &device_cov1_filter[0][0][0][0];
+    float *out = &device_output[0][offset_Out_GM];
+    
+    int col = 0;
+    for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch, out = &device_output[ch][offset_Out_GM]) {
+
+        for (int y_offset=y_pad; y_offset >= max(0, y + topPadding - filterSize -1); --y_offset, 
+            filterChOffset += filterSize, out -= (in_cols - col)) {
+            
+            col = 0;
+            for (int x_offset=x_pad; x_offset >= max(0, x + leftPadding - filterSize -1) && col <= filterSize;
+                 ++col, --x_offset, out -= 1) {
+                offset_Out_GM = y_offset * in_cols + x_offset;
+                *(out + offset_Out_GM) += (inData * *(filterChOffset + col));
+                //__syncthreads();
+            }
+        }
+    }
+}
+
+// Run this for Single and Last
+__global__ void device_CNN_Multi_v3_End(int out_cols, int out_rows) {
+    // Position relative to global memory of 2D matrix
+    const int x = threadIdx.x + blockIdx.x * blockDim.x;
+    const int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+    if (x >= out_cols || y >= out_rows) {
+        return;
+    }
+
+    const int ch = y / out_rows; 
+    int offset_Out_GM = y * out_cols + x;
+
+    // Write to output
+    float *out = &device_output[ch][offset_Out_GM];
+    *out = relu(*out + device_cov1_b[ch]);
 }
 #endif
 
@@ -662,6 +625,9 @@ void layer1_cov1_multi(int bytes, dim3 grid, dim3 block,
     // Get output memory
     for (int ch=0; ch < COV1_FILTER_OUT_CH; ++ch) {
         gpuErrchk(cudaMalloc((void **)&d_output[ch], bytes));
+#ifdef Enable_Version3_Conv
+        gpuErrchk(cudaMemset(d_output[ch], 0.0, bytes));
+#endif
         // printf("Addr%d: %p %p", ch, &d_output[ch], d_output[ch]);
         gpuErrchk( cudaMemcpyToSymbol(device_output[0], &d_output[ch], sizeof(float*),
             ch*sizeof(float*), cudaMemcpyHostToDevice) );
@@ -678,8 +644,21 @@ void layer1_cov1_multi(int bytes, dim3 grid, dim3 block,
     device_CNN_Multi_SHMEM<<<grid, block, shmemSize>>>(INPUT_WIDTH, INPUT_HEIGHT, d_input, COV1_FILTER_N, true, false, false,
         totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);   
 #else
-    device_CNN_Multi_v1_single<<<grid, block>>>(INPUT_WIDTH, INPUT_HEIGHT, d_input, COV1_FILTER_N,
+#ifdef Enable_Version3_Conv
+    device_CNN_Multi_v3<<<grid, block>>>(INPUT_WIDTH, INPUT_HEIGHT, d_input, COV1_FILTER_N,
         totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
+
+    // To add ReLU and bias
+    // Thread handles one element
+    dim3 block1(32,32); 
+    dim3 grid1( (INPUT_WIDTH + block.x-1) / block.x, 
+               ((INPUT_HEIGHT*COV1_FILTER_OUT_CH) + block.y-1) / block.y);
+
+    device_CNN_Multi_v3_End<<<grid1,block1>>>(INPUT_WIDTH, INPUT_HEIGHT);
+#else
+    device_CNN_Multi_v1<<<grid, block>>>(INPUT_WIDTH, INPUT_HEIGHT, d_input, COV1_FILTER_N, true, false, false,
+        totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
+#endif
 #endif
 
     gpuErrchk(cudaDeviceSynchronize());
@@ -732,10 +711,12 @@ void layer2_cov_multi(int outChSize, int filterSize, int in_cols, int in_rows, f
     dim3 grid( (in_cols + block.x-1) / block.x, 
                (in_rows + block.y-1) / block.y);
 
-
     // Get output memory
     for (int ch=0; ch < outChSize; ++ch) {
         gpuErrchk(cudaMalloc((void **)&d_output[ch], bytes));
+#ifdef Enable_Version3_Conv
+        gpuErrchk(cudaMemset(d_output[ch], 0.0, bytes));
+#endif
         // printf("Addr%d: %p %p", ch, &d_output[ch], d_output[ch]);
         gpuErrchk( cudaMemcpyToSymbol(device_output[0], &d_output[ch], sizeof(float*),
             ch*sizeof(float*), cudaMemcpyHostToDevice) );
@@ -765,20 +746,34 @@ void layer2_cov_multi(int outChSize, int filterSize, int in_cols, int in_rows, f
             false, (ch == 0) ? true : false, (ch == (outChSize-1)) ? true : false,
             totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);   
 #else
+#ifdef Enable_Version3_Conv
+       device_CNN_Multi_v3<<<grid, block>>>(in_cols, in_rows, d_input[ch], filterSize,
+                totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
+#else
         if (ch == 0) {
-            device_CNN_Multi_v1_first<<<grid, block>>>(in_cols, in_rows, d_input[ch], filterSize,
+            device_CNN_Multi_v1<<<grid, block>>>(in_cols, in_rows, d_input[ch], filterSize, false, true, false,
                 totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
         }
         else if (ch == (outChSize-1)) {
-            device_CNN_Multi_v1_last<<<grid, block>>>(in_cols, in_rows, d_input[ch], filterSize,
+            device_CNN_Multi_v1<<<grid, block>>>(in_cols, in_rows, d_input[ch], filterSize, false, false, true,
                 totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
         }
         else {
-            device_CNN_Multi_v1_middle<<<grid, block>>>(in_cols, in_rows, d_input[ch], filterSize,
+            device_CNN_Multi_v1<<<grid, block>>>(in_cols, in_rows, d_input[ch], filterSize, false, false, false,
                 totalPaddingHeight, totalPaddingWidth, topPadding, bottomPadding, leftPadding, rightPadding);
         }
 #endif
+#endif
     }
+
+#ifdef Enable_Version3_Conv
+    // To add ReLU and bias
+    // Thread handles one element
+    dim3 block1(32,32); 
+    dim3 grid1( (INPUT_WIDTH + block.x-1) / block.x, 
+               ((INPUT_HEIGHT*COV1_FILTER_OUT_CH) + block.y-1) / block.y);
+    device_CNN_Multi_v3_End<<<grid1,block1>>>(INPUT_WIDTH, INPUT_HEIGHT);
+#endif
     gpuErrchk(cudaDeviceSynchronize());
 }
 
